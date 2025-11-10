@@ -43,3 +43,11 @@ bin/
 .DS_Store
 
 terrain_cache/
+
+carto_cache/
+
+thunder_cache/
+
+*.png
+
+.idea/
