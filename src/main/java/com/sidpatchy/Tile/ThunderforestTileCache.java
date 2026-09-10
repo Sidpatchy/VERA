@@ -20,13 +20,25 @@ public class ThunderforestTileCache {
     private final long maxAgeSeconds = 365L * 24 * 60 * 60; // 365 days
     private final String apiKey;
 
+    public static String resolveApiKey(String explicitKey) {
+        if (explicitKey != null && !explicitKey.isBlank()) return explicitKey.trim();
+        String value = System.getProperty("thunderforest.api.key");
+        if (value != null && !value.isBlank()) return value.trim();
+        value = System.getProperty("tfKey");
+        if (value != null && !value.isBlank()) return value.trim();
+        value = System.getenv("THUNDERFOREST_API_KEY");
+        if (value != null && !value.isBlank()) return value.trim();
+        value = System.getenv("TF_KEY");
+        return value != null && !value.isBlank() ? value.trim() : null;
+    }
+
     /**
      * @param cachePath directory where tiles are cached
      * @param apiKey Thunderforest API key
      */
     public ThunderforestTileCache(String cachePath, String apiKey) {
         this.cacheDir = Paths.get(cachePath);
-        this.apiKey = apiKey;
+        this.apiKey = resolveApiKey(apiKey);
         try {
             Files.createDirectories(cacheDir);
         } catch (IOException e) {

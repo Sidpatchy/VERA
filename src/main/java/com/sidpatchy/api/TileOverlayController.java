@@ -112,6 +112,7 @@ public class TileOverlayController {
             @RequestParam(name = "base", defaultValue = "none") String base,
             @RequestParam(name = "terrainCache", required = false) String terrainCacheDir,
             @RequestParam(name = "cartoCache", required = false) String cartoCacheDir,
+            @RequestParam(name = "cartoKey", required = false) String cartoApiKey,
             @RequestParam(name = "tfCache", required = false) String tfCacheDir,
             @RequestParam(name = "tfKey", required = false) String thunderforestApiKey,
             @RequestParam(name = "color", required = false) String colorHex,
@@ -302,7 +303,7 @@ public class TileOverlayController {
         Color overlayColor = parseColor(colorHex, new Color(255, 0, 0, 120));
         switch (baseNorm) {
             case "carto": {
-                CartoTileCache carto = new CartoTileCache(cartoCacheDir != null ? cartoCacheDir : DEFAULT_CARTO_CACHE);
+                CartoTileCache carto = new CartoTileCache(cartoCacheDir != null ? cartoCacheDir : DEFAULT_CARTO_CACHE, cartoApiKey);
                 java.io.File f = carto.getTile(z, x, y);
                 BufferedImage baseImg = javax.imageio.ImageIO.read(f);
                 outImg = ElevationService.overlayLosOnBase(cropped, baseImg, overlayColor);
@@ -420,6 +421,7 @@ public class TileOverlayController {
             @RequestParam(name = "base", required = false) String base,
             @RequestParam(name = "terrainCache", required = false) String terrainCacheDir,
             @RequestParam(name = "cartoCache", required = false) String cartoCacheDir,
+            @RequestParam(name = "cartoKey", required = false) String cartoApiKey,
             @RequestParam(name = "tfCache", required = false) String tfCacheDir,
             @RequestParam(name = "tfKey", required = false) String thunderforestApiKey,
             @RequestParam(name = "color", required = false) String colorHex,
@@ -480,8 +482,9 @@ public class TileOverlayController {
         CartoTileCache carto = null;
         ThunderforestTileCache tf = null;
         if ("carto".equalsIgnoreCase(base)) {
-            carto = new CartoTileCache(cartoCacheDir != null ? cartoCacheDir : DEFAULT_CARTO_CACHE);
+            carto = new CartoTileCache(cartoCacheDir != null ? cartoCacheDir : DEFAULT_CARTO_CACHE, cartoApiKey);
         } else if ("thunder".equalsIgnoreCase(base)) {
+            thunderforestApiKey = ThunderforestTileCache.resolveApiKey(thunderforestApiKey);
             if (thunderforestApiKey == null || thunderforestApiKey.isBlank()) {
                 return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                         .body("{\"error\":\"base=thunder requires tfKey\"}");
@@ -584,10 +587,10 @@ public class TileOverlayController {
                 if (!fullWorld && xMax < xMin) {
                     int a1 = 0, b1 = xMax;
                     int a2 = xMin, b2 = n - 1;
-                    total += handleRectCompositeAndEnqueue(z, yMin, yMax, a1, b1, maxAxis, compositeMaxTiles, observers, effAgl, effAngleBins, effBase, colorHex, thunderforestApiKey, cartoCacheDir, tfCacheDir, terrainCache, carto, tf, imgCache, fmt, quality, renderedAtomic, tileJobs, overlayKey, radiusLimit, centerTileX, centerTileY);
-                    total += handleRectCompositeAndEnqueue(z, yMin, yMax, a2, b2, maxAxis, compositeMaxTiles, observers, effAgl, effAngleBins, effBase, colorHex, thunderforestApiKey, cartoCacheDir, tfCacheDir, terrainCache, carto, tf, imgCache, fmt, quality, renderedAtomic, tileJobs, overlayKey, radiusLimit, centerTileX, centerTileY);
+                    total += handleRectCompositeAndEnqueue(z, yMin, yMax, a1, b1, maxAxis, compositeMaxTiles, observers, effAgl, effAngleBins, effBase, colorHex, thunderforestApiKey, cartoApiKey, cartoCacheDir, tfCacheDir, terrainCache, carto, tf, imgCache, fmt, quality, renderedAtomic, tileJobs, overlayKey, radiusLimit, centerTileX, centerTileY);
+                    total += handleRectCompositeAndEnqueue(z, yMin, yMax, a2, b2, maxAxis, compositeMaxTiles, observers, effAgl, effAngleBins, effBase, colorHex, thunderforestApiKey, cartoApiKey, cartoCacheDir, tfCacheDir, terrainCache, carto, tf, imgCache, fmt, quality, renderedAtomic, tileJobs, overlayKey, radiusLimit, centerTileX, centerTileY);
                 } else {
-                    total += handleRectCompositeAndEnqueue(z, yMin, yMax, xMin, xMax, maxAxis, compositeMaxTiles, observers, effAgl, effAngleBins, effBase, colorHex, thunderforestApiKey, cartoCacheDir, tfCacheDir, terrainCache, carto, tf, imgCache, fmt, quality, renderedAtomic, tileJobs, overlayKey, radiusLimit, centerTileX, centerTileY);
+                    total += handleRectCompositeAndEnqueue(z, yMin, yMax, xMin, xMax, maxAxis, compositeMaxTiles, observers, effAgl, effAngleBins, effBase, colorHex, thunderforestApiKey, cartoApiKey, cartoCacheDir, tfCacheDir, terrainCache, carto, tf, imgCache, fmt, quality, renderedAtomic, tileJobs, overlayKey, radiusLimit, centerTileX, centerTileY);
                 }
             }
         }
@@ -607,6 +610,7 @@ public class TileOverlayController {
         final String baseFinal = effBase;
         final TileCache terrainCacheFinal = terrainCache;
         final CartoTileCache cartoFinal = carto;
+        final String cartoKeyFinal = cartoApiKey;
         final ThunderforestTileCache tfFinal = tf;
         final String tfKeyFinal = thunderforestApiKey;
         final String colorFinal = colorHex;
@@ -617,7 +621,7 @@ public class TileOverlayController {
             final int jz = job[0], jx = job[1], jy = job[2];
             exec.submit(() -> {
                 try {
-                    if (generateLosTileIfMissing(imgCache, fmt, jz, jx, jy, obsFinal, aglFinal, angleBinsFinal, baseFinal, terrainCacheFinal, cartoFinal, tfFinal, tfKeyFinal, colorFinal, qualFinal)) {
+                    if (generateLosTileIfMissing(imgCache, fmt, jz, jx, jy, obsFinal, aglFinal, angleBinsFinal, baseFinal, terrainCacheFinal, cartoFinal, cartoKeyFinal, tfFinal, tfKeyFinal, colorFinal, qualFinal)) {
                         renderedAtomic.incrementAndGet();
                     }
                 } catch (IOException ignored) {}
@@ -654,6 +658,7 @@ public class TileOverlayController {
             String base,
             String colorHex,
             String thunderforestApiKey,
+            String cartoApiKey,
             String cartoCacheDir,
             String tfCacheDir,
             TileCache terrainCache,
@@ -747,7 +752,7 @@ public class TileOverlayController {
                         switch (baseNorm2) {
                             case "carto": {
                                 CartoTileCache cartoUse = carto;
-                                if (cartoUse == null) cartoUse = new CartoTileCache(cartoCacheDir != null ? cartoCacheDir : DEFAULT_CARTO_CACHE);
+                                if (cartoUse == null) cartoUse = new CartoTileCache(cartoCacheDir != null ? cartoCacheDir : DEFAULT_CARTO_CACHE, cartoApiKey);
                                 java.io.File f = cartoUse.getTile(z, xx, yy);
                                 BufferedImage baseImg = javax.imageio.ImageIO.read(f);
                                 outImg = ElevationService.overlayLosOnBase(cropped, baseImg, overlayColor);
@@ -803,6 +808,7 @@ public class TileOverlayController {
                                              String base,
                                              TileCache terrainCache,
                                              CartoTileCache carto,
+                                             String cartoApiKey,
                                              ThunderforestTileCache tf,
                                              String thunderforestApiKey,
                                              String colorHex,
@@ -889,7 +895,7 @@ public class TileOverlayController {
         BufferedImage outImg;
         switch (baseNorm) {
             case "carto": {
-                if (carto == null) carto = new CartoTileCache(DEFAULT_CARTO_CACHE);
+                if (carto == null) carto = new CartoTileCache(DEFAULT_CARTO_CACHE, cartoApiKey);
                 java.io.File f = carto.getTile(z, x, y);
                 BufferedImage baseImg = javax.imageio.ImageIO.read(f);
                 outImg = ElevationService.overlayLosOnBase(cropped, baseImg, overlayColor);

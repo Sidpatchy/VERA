@@ -14,7 +14,8 @@ public class Main {
     private static void printUsage() {
         System.out.println("VERA CLI\n" +
                 "Commands:\n" +
-                "  serve [--host <addr>] [--port <p>]    Start REST API server (Spring Boot)\n" +
+                "  serve [--host <addr>] [--port <p>] [--tfKey <key>] [--cartoKey <key>]\n" +
+                "                                           Start REST API server (Spring Boot)\n" +
                 "  elevation --lat <v> --lon <v> [--zoom <z>] [--cache <dir>]\n" +
                 "                                           Print elevation (meters) at lat/lon\n" +
                 "  los --lat <v> --lon <v> [--zoom <z>] [--agl <m>] [--radius <tiles>]\n" +
@@ -57,6 +58,8 @@ public class Main {
                 Map<String, String> p = parseArgs(args);
                 if (p.containsKey("host")) System.setProperty("server.address", p.get("host"));
                 if (p.containsKey("port")) System.setProperty("server.port", p.get("port"));
+                if (p.containsKey("tfKey")) System.setProperty("thunderforest.api.key", p.get("tfKey"));
+                if (p.containsKey("cartoKey")) System.setProperty("carto.api.key", p.get("cartoKey"));
                 ApiApplication.main(new String[]{});
                 break;
             }
@@ -89,13 +92,21 @@ public class Main {
                         grid, lat, lon, ElevationService.ObserverHeightMode.AGL, agl, cache, angleBins);
 
                 if (overlay) {
-                    String tfKey = p.get("tfKey");
-                    if (tfKey == null || tfKey.isBlank()) {
-                        System.err.println("--overlay requires --tfKey <key>");
-                        return;
+                    String tfKey = ThunderforestTileCache.resolveApiKey(p.get("tfKey"));
+                    if (tfKey != null && !tfKey.isBlank()) {
+                        ThunderforestTileCache tf = new ThunderforestTileCache(
+                                p.getOrDefault("tfCache", "./thunder_cache"), tfKey);
+                        ElevationService.saveLosOverlayOnThunderforest(losMasked, tf, new File(out), lat, lon);
+                    } else {
+                        String cartoKey = com.sidpatchy.Tile.CartoTileCache.resolveApiKey(p.get("cartoKey"));
+                        if (cartoKey == null || cartoKey.isBlank()) {
+                            System.err.println("--overlay requires a Thunderforest or Carto API key");
+                            return;
+                        }
+                        com.sidpatchy.Tile.CartoTileCache carto = new com.sidpatchy.Tile.CartoTileCache(
+                                p.getOrDefault("cartoCache", "./carto_cache"), cartoKey);
+                        ElevationService.saveLosOverlayOnCarto(losMasked, carto, new File(out));
                     }
-                    ThunderforestTileCache tf = new ThunderforestTileCache(p.getOrDefault("tfCache", "./thunder_cache"), tfKey);
-                    ElevationService.saveLosOverlayOnThunderforest(losMasked, tf, new File(out), lat, lon);
                 } else {
                     ElevationService.saveElevationGridAsPng(losMasked, new File(out));
                 }
@@ -178,7 +189,7 @@ public class Main {
                                             if (type.equals("terrain")) {
                                                 new TileCache(cacheDir).getTile(z, x, y);
                                             } else if (type.equals("carto")) {
-                                                new com.sidpatchy.Tile.CartoTileCache(cacheDir).getTile(z, x, y);
+                                                new com.sidpatchy.Tile.CartoTileCache(cacheDir, p.get("cartoKey")).getTile(z, x, y);
                                             } else {
                                                 new com.sidpatchy.Tile.ThunderforestTileCache(cacheDir, tfKey).getTile(z, x, y);
                                             }
@@ -197,7 +208,7 @@ public class Main {
                                         if (type.equals("terrain")) {
                                             new TileCache(cacheDir).getTile(z, x, y);
                                         } else if (type.equals("carto")) {
-                                            new com.sidpatchy.Tile.CartoTileCache(cacheDir).getTile(z, x, y);
+                                            new com.sidpatchy.Tile.CartoTileCache(cacheDir, p.get("cartoKey")).getTile(z, x, y);
                                         } else {
                                             new com.sidpatchy.Tile.ThunderforestTileCache(cacheDir, tfKey).getTile(z, x, y);
                                         }

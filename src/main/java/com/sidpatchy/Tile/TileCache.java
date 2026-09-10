@@ -5,6 +5,7 @@ import java.net.URL;
 import java.nio.file.*;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import javax.imageio.ImageIO;
 
 public class TileCache {
     private final Path cacheDir;
@@ -32,7 +33,14 @@ public class TileCache {
             );
 
             if (fileAge < maxAgeSeconds) {
-                return tileFile;
+                try {
+                    if (ImageIO.read(tileFile) != null) {
+                        return tileFile;
+                    }
+                } catch (IOException ignored) {
+                    // The cache entry is incomplete or otherwise invalid; redownload it below.
+                }
+                Files.deleteIfExists(tilePath);
             }
         }
 
@@ -42,8 +50,29 @@ public class TileCache {
                 zoom, x, y
         );
 
-        try (InputStream in = new URL(url).openStream()) {
-            Files.copy(in, tilePath, StandardCopyOption.REPLACE_EXISTING);
+        Path temporaryPath = Files.createTempFile(cacheDir, filename, ".part");
+        try {
+            try (InputStream in = new URL(url).openStream()) {
+                Files.copy(in, temporaryPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+
+            // Do not publish truncated or non-image responses to the cache.
+            try {
+                if (ImageIO.read(temporaryPath.toFile()) == null) {
+                    throw new IOException("Downloaded tile is not a readable PNG: " + url);
+                }
+            } catch (IOException e) {
+                throw new IOException("Downloaded tile is corrupt: " + url, e);
+            }
+
+            try {
+                Files.move(temporaryPath, tilePath,
+                        StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(temporaryPath, tilePath, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temporaryPath);
         }
 
         return tileFile;

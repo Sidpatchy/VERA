@@ -51,10 +51,13 @@ public class TileController {
             @PathVariable int z,
             @PathVariable int x,
             @PathVariable int y,
-            @RequestParam(name = "cacheDir", required = false) String cacheDir
+            @RequestParam(name = "cacheDir", required = false) String cacheDir,
+            @RequestParam(name = "apiKey", required = false) String apiKey,
+            @RequestParam(name = "cartoKey", required = false) String cartoKey
     ) {
         try {
-            CartoTileCache cache = new CartoTileCache(cacheDir != null ? cacheDir : DEFAULT_CARTO_CACHE);
+            String key = (cartoKey != null && !cartoKey.isBlank()) ? cartoKey : apiKey;
+            CartoTileCache cache = new CartoTileCache(cacheDir != null ? cacheDir : DEFAULT_CARTO_CACHE, key);
             File f = cache.getTile(z, x, y);
             byte[] data = Files.readAllBytes(f.toPath());
             HttpHeaders headers = new HttpHeaders();

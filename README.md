@@ -4,6 +4,19 @@ Utilities for retrieving and composing terrain elevations from Mapzen Terrarium 
 
 ## Quick start
 
+### Server API keys
+
+The server accepts provider keys on the CLI, so keys do not need to be included in every tile request:
+
+```bash
+./gradlew bootRun --args="serve --tfKey YOUR_THUNDERFOREST_KEY --cartoKey YOUR_CARTO_KEY"
+```
+
+The same values can be supplied through `THUNDERFOREST_API_KEY`/`TF_KEY` and
+`CARTO_API_KEY`/`CARTO_KEY`, or the corresponding JVM properties
+`thunderforest.api.key` and `carto.api.key`. Request parameters `tfKey` and
+`cartoKey` remain supported and override the defaults.
+
 ```java
 TileCache cache = new TileCache("./terrain_cache");
 
