@@ -1,11 +1,14 @@
 plugins {
     id("java")
-    id("org.springframework.boot") version "3.5.7"
-    id("io.spring.dependency-management") version "1.1.6"
+    id("application")
 }
 
 group = "com.sidpatchy"
 version = "1.0-SNAPSHOT"
+
+application {
+    mainClass.set("com.sidpatchy.Main")
+}
 
 java {
     toolchain {
@@ -18,7 +21,6 @@ repositories {
 }
 
 dependencies {
-    implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("com.twelvemonkeys.imageio:imageio-webp:3.12.0")
 
     testImplementation(platform("org.junit:junit-bom:5.10.0"))
@@ -26,8 +28,14 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
-springBoot {
+tasks.named<JavaExec>("run") {
     mainClass.set("com.sidpatchy.Main")
+}
+
+tasks.jar {
+    manifest {
+        attributes["Main-Class"] = "com.sidpatchy.Main"
+    }
 }
 
 tasks.test {

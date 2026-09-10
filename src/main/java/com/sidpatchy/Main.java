@@ -3,7 +3,6 @@ package com.sidpatchy;
 import com.sidpatchy.Tile.ElevationService;
 import com.sidpatchy.Tile.TileCache;
 import com.sidpatchy.Tile.ThunderforestTileCache;
-import com.sidpatchy.Tile.CartoTileCache;
 
 import java.io.File;
 import java.io.IOException;
@@ -14,8 +13,6 @@ public class Main {
     private static void printUsage() {
         System.out.println("VERA CLI\n" +
                 "Commands:\n" +
-                "  serve [--host <addr>] [--port <p>] [--tfKey <key>] [--cartoKey <key>]\n" +
-                "                                           Start REST API server (Spring Boot)\n" +
                 "  elevation --lat <v> --lon <v> [--zoom <z>] [--cache <dir>]\n" +
                 "                                           Print elevation (meters) at lat/lon\n" +
                 "  los --lat <v> --lon <v> [--zoom <z>] [--agl <m>] [--radius <tiles>]\n" +
@@ -54,15 +51,6 @@ public class Main {
 
         String cmd = args[0].toLowerCase();
         switch (cmd) {
-            case "serve": {
-                Map<String, String> p = parseArgs(args);
-                if (p.containsKey("host")) System.setProperty("server.address", p.get("host"));
-                if (p.containsKey("port")) System.setProperty("server.port", p.get("port"));
-                if (p.containsKey("tfKey")) System.setProperty("thunderforest.api.key", p.get("tfKey"));
-                if (p.containsKey("cartoKey")) System.setProperty("carto.api.key", p.get("cartoKey"));
-                ApiApplication.main(new String[]{});
-                break;
-            }
             case "elevation": {
                 Map<String, String> p = parseArgs(args);
                 double lat = Double.parseDouble(p.getOrDefault("lat", Double.toString(42.32626564830605)));
