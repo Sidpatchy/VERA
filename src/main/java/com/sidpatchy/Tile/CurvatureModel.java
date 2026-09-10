@@ -1,12 +1,14 @@
 package com.sidpatchy.Tile;
 
 import java.io.*;
+import java.awt.image.BufferedImage;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.function.IntConsumer;
 
 /**
  * Curvature model utilities. Provides optimized curvature-compensation for elevation grids
@@ -59,25 +61,98 @@ public final class CurvatureModel {
 
         int w = grid.width;
         int h = grid.height;
-        double[][] out = new double[h][w];
+        float[][] out = new float[h][w];
         double cx = (w - 1) / 2.0;
         double cy = (h - 1) / 2.0;
 
         // Vectorized-style inner loops (but in Java)
         for (int y = 0; y < h; y++) {
-            double[] inRow = grid.data[y];
-            double[] outRow = out[y];
+            float[] inRow = grid.data[y];
+            float[] outRow = out[y];
             double dy = (y - cy);
             for (int x = 0; x < w; x++) {
                 double v = inRow[x];
-                if (Double.isNaN(v)) { outRow[x] = Double.NaN; continue; }
+                if (Double.isNaN(v)) { outRow[x] = Float.NaN; continue; }
                 double dx = (x - cx);
                 double sMeters = Math.hypot(dx, dy) * metersPerPixel;
                 double drop = (sMeters * sMeters) / (2.0 * earthRadiusMeters);
-                outRow[x] = v - drop;
+                outRow[x] = (float) (v - drop);
             }
         }
         return new ElevationService.ElevationGrid(out, grid.tileSize, grid.tilesWide, grid.tilesHigh, grid.zoom, grid.centerTileX, grid.centerTileY);
+    }
+
+    /**
+     * Renders the observer-relative curvature-adjusted grid without allocating a second grid.
+     * The resulting image uses the same automatic grayscale scaling as elevation exports.
+     */
+    public static BufferedImage observerCurvatureToImage(
+            ElevationService.ElevationGrid grid,
+            double observerLatDeg,
+            double observerLonDeg,
+            ElevationService.ObserverHeightMode mode,
+            Double heightMeters,
+            TileCache cache,
+            IntConsumer progress) throws IOException {
+        double min = Double.POSITIVE_INFINITY;
+        double max = Double.NEGATIVE_INFINITY;
+        for (int y = 0; y < grid.height; y++) {
+            float[] row = grid.data[y];
+            for (int x = 0; x < grid.width; x++) {
+                double value = curvatureValue(row[x], x, y, grid, observerLatDeg, observerLonDeg);
+                if (!Double.isNaN(value)) {
+                    min = Math.min(min, value);
+                    max = Math.max(max, value);
+                }
+            }
+        }
+
+        BufferedImage image = new BufferedImage(grid.width, grid.height, BufferedImage.TYPE_INT_ARGB);
+        int[] pixels = new int[grid.width];
+        double range = max - min;
+        boolean flat = !Double.isFinite(range) || range == 0.0;
+        for (int y = 0; y < grid.height; y++) {
+            float[] row = grid.data[y];
+            for (int x = 0; x < grid.width; x++) {
+                double value = curvatureValue(row[x], x, y, grid, observerLatDeg, observerLonDeg);
+                if (Double.isNaN(value)) {
+                    pixels[x] = 0x00000000;
+                } else {
+                    double normalized = flat ? 0.5 : Math.max(0.0, Math.min(1.0, (value - min) / range));
+                    int gray = (int) Math.round(normalized * 255.0);
+                    pixels[x] = 0xFF000000 | (gray << 16) | (gray << 8) | gray;
+                }
+            }
+            image.setRGB(0, y, grid.width, 1, pixels, 0, grid.width);
+            progress.accept(y + 1);
+        }
+        return image;
+    }
+
+    private static double curvatureValue(float value, int x, int y,
+                                         ElevationService.ElevationGrid grid,
+                                         double observerLatDeg, double observerLonDeg) {
+        if (Float.isNaN(value)) return Double.NaN;
+        double centralAngle = centralAngle(observerLatDeg, observerLonDeg,
+                gridPixelToLatLon(grid, x, y));
+        double drop = DEFAULT_EARTH_RADIUS_M * (1.0 - Math.cos(centralAngle));
+        return value - drop;
+    }
+
+    private static double observerEyeAgl(ElevationService.ElevationGrid grid, double[] observerPx,
+                                         double observerLatDeg, double observerLonDeg,
+                                         ElevationService.ObserverHeightMode mode, Double heightMeters,
+                                         TileCache cache) {
+        if (heightMeters == null) return 0.0;
+        double height = Math.max(0.0, heightMeters);
+        if (mode != ElevationService.ObserverHeightMode.ASL) return height;
+        double ground = Double.NaN;
+        if (isInside(grid, observerPx[0], observerPx[1])) ground = sampleNearest(grid, observerPx[0], observerPx[1]);
+        if (Double.isNaN(ground) && cache != null) {
+            try { ground = ElevationService.getElevationAt(observerLatDeg, observerLonDeg, grid.zoom, cache); }
+            catch (Exception ignored) { }
+        }
+        return Double.isNaN(ground) ? height : Math.max(0.0, height - ground);
     }
 
     /**
@@ -121,47 +196,18 @@ public final class CurvatureModel {
             }
         }
 
-        // Compute meters per pixel at observer latitude
-        double metersPerPixel = (2.0 * Math.PI * earthRadiusMeters * Math.cos(Math.toRadians(observerLatDeg)))
-                / (grid.tileSize * Math.pow(2.0, grid.zoom));
-
-        // Observer pixel in the grid
-        double[] obsPx = latLonToGridPixel(grid, observerLatDeg, observerLonDeg);
-
-        // Determine eye height AGL
-        double eyeAGL = 0.0;
-        if (mode == ElevationService.ObserverHeightMode.AGL && heightMeters != null) {
-            eyeAGL = Math.max(0.0, heightMeters);
-        } else if (mode == ElevationService.ObserverHeightMode.ASL && heightMeters != null) {
-            double ground = Double.NaN;
-            if (isInside(grid, obsPx[0], obsPx[1])) {
-                ground = sampleNearest(grid, obsPx[0], obsPx[1]);
-            }
-            if (Double.isNaN(ground) && cache != null) {
-                try { ground = ElevationService.getElevationAt(observerLatDeg, observerLonDeg, grid.zoom, cache); }
-                catch (Exception ignore) { ground = Double.NaN; }
-            }
-            if (!Double.isNaN(ground)) eyeAGL = Math.max(0.0, heightMeters - ground); else eyeAGL = Math.max(0.0, heightMeters);
-        }
-        double horizonMeters = eyeAGL > 0.0 ? Math.sqrt(2.0 * earthRadiusMeters * eyeAGL + eyeAGL * eyeAGL) : 0.0;
-
         int w = grid.width, h = grid.height;
-        double[][] out = new double[h][w];
+        float[][] out = new float[h][w];
         for (int y = 0; y < h; y++) {
-            double[] inRow = grid.data[y];
-            double[] outRow = out[y];
+            float[] inRow = grid.data[y];
+            float[] outRow = out[y];
             for (int x = 0; x < w; x++) {
                 double v = inRow[x];
-                if (Double.isNaN(v)) { outRow[x] = Double.NaN; continue; }
-                double dx = x - obsPx[0];
-                double dy = y - obsPx[1];
-                double sMeters = Math.hypot(dx, dy) * metersPerPixel;
-                if (horizonMeters > 0.0 && sMeters <= horizonMeters) {
-                    outRow[x] = v;
-                } else {
-                    double drop = (sMeters * sMeters) / (2.0 * earthRadiusMeters);
-                    outRow[x] = v - drop;
-                }
+                if (Double.isNaN(v)) { outRow[x] = Float.NaN; continue; }
+                double centralAngle = centralAngle(observerLatDeg, observerLonDeg,
+                        gridPixelToLatLon(grid, x, y));
+                double drop = earthRadiusMeters * (1.0 - Math.cos(centralAngle));
+                outRow[x] = (float) (v - drop);
             }
         }
         ElevationService.ElevationGrid result = new ElevationService.ElevationGrid(out, grid.tileSize, grid.tilesWide, grid.tilesHigh, grid.zoom, grid.centerTileX, grid.centerTileY);
@@ -169,6 +215,49 @@ public final class CurvatureModel {
         if (enableCache && filePath != null) {
             tryWriteGrid(filePath, result);
         }
+        return result;
+    }
+
+    private static double sampleBilinear(ElevationService.ElevationGrid grid, double px, double py) {
+        if (!isInside(grid, px, py)) return Double.NaN;
+        int x0 = (int) Math.floor(px);
+        int y0 = (int) Math.floor(py);
+        int x1 = Math.min(x0 + 1, grid.width - 1);
+        int y1 = Math.min(y0 + 1, grid.height - 1);
+        double tx = px - x0;
+        double ty = py - y0;
+        double a = grid.data[y0][x0], b = grid.data[y0][x1];
+        double c = grid.data[y1][x0], d = grid.data[y1][x1];
+        if (Double.isNaN(a) || Double.isNaN(b) || Double.isNaN(c) || Double.isNaN(d)) return Double.NaN;
+        return (a * (1.0 - tx) + b * tx) * (1.0 - ty)
+                + (c * (1.0 - tx) + d * tx) * ty;
+    }
+
+    private static double[] gridPixelToLatLon(ElevationService.ElevationGrid grid, double px, double py) {
+        int radiusTiles = (grid.tilesWide - 1) / 2;
+        double n = Math.pow(2.0, grid.zoom);
+        double globalX = grid.centerTileX - radiusTiles + px / grid.tileSize;
+        double globalY = grid.centerTileY - radiusTiles + py / grid.tileSize;
+        double lon = normalizeLongitude(globalX / n * 360.0 - 180.0);
+        double mercator = Math.PI * (1.0 - 2.0 * globalY / n);
+        double lat = Math.toDegrees(Math.atan(Math.sinh(mercator)));
+        return new double[]{lat, lon};
+    }
+
+    private static double centralAngle(double observerLatDeg, double observerLonDeg, double[] pointLatLon) {
+        double lat1 = Math.toRadians(observerLatDeg);
+        double lat2 = Math.toRadians(pointLatLon[0]);
+        double dLat = lat2 - lat1;
+        double dLon = Math.toRadians(shortestLongitudeDelta(pointLatLon[1] - observerLonDeg));
+        double haversine = Math.sin(dLat * 0.5) * Math.sin(dLat * 0.5)
+                + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon * 0.5) * Math.sin(dLon * 0.5);
+        return 2.0 * Math.atan2(Math.sqrt(haversine), Math.sqrt(Math.max(0.0, 1.0 - haversine)));
+    }
+
+    private static double shortestLongitudeDelta(double delta) {
+        double result = delta % 360.0;
+        if (result < -180.0) result += 360.0;
+        if (result >= 180.0) result -= 360.0;
         return result;
     }
 
@@ -181,9 +270,9 @@ public final class CurvatureModel {
             // Also mix in a lightweight checksum of grid values to avoid mismatches when tiles change
             long checksum = 0;
             for (int y = 0; y < g.height; y+=Math.max(1, g.height/64)) {
-                double[] row = g.data[y];
+                float[] row = g.data[y];
                 for (int x = 0; x < g.width; x+=Math.max(1, g.width/64)) {
-                    long bits = Double.doubleToLongBits(row[x]);
+                    long bits = Float.floatToIntBits(row[x]);
                     checksum = (checksum * 1315423911L) ^ bits;
                 }
             }
@@ -197,13 +286,13 @@ public final class CurvatureModel {
 
     private static void tryWriteGrid(Path file, ElevationService.ElevationGrid grid) {
         try (DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(Files.newOutputStream(file)))) {
-            dos.writeInt(1); // version
+            dos.writeInt(2); // version; values are float32
             dos.writeInt(grid.width);
             dos.writeInt(grid.height);
             for (int y = 0; y < grid.height; y++) {
-                double[] row = grid.data[y];
+                float[] row = grid.data[y];
                 for (int x = 0; x < grid.width; x++) {
-                    dos.writeDouble(row[x]);
+                    dos.writeFloat(row[x]);
                 }
             }
         } catch (IOException ignore) { }
@@ -212,15 +301,15 @@ public final class CurvatureModel {
     private static ElevationService.ElevationGrid tryReadGrid(Path file, ElevationService.ElevationGrid like) {
         try (DataInputStream dis = new DataInputStream(new BufferedInputStream(Files.newInputStream(file)))) {
             int ver = dis.readInt();
-            if (ver != 1) return null;
+            if (ver != 2) return null;
             int w = dis.readInt();
             int h = dis.readInt();
             if (w != like.width || h != like.height) return null;
-            double[][] data = new double[h][w];
+            float[][] data = new float[h][w];
             for (int y = 0; y < h; y++) {
-                double[] row = data[y];
+                float[] row = data[y];
                 for (int x = 0; x < w; x++) {
-                    row[x] = dis.readDouble();
+                    row[x] = dis.readFloat();
                 }
             }
             return new ElevationService.ElevationGrid(data, like.tileSize, like.tilesWide, like.tilesHigh, like.zoom, like.centerTileX, like.centerTileY);

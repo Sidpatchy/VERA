@@ -15,6 +15,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.IntConsumer;
 
 /**
  * Utility service for retrieving elevations from Terrarium tiles.
@@ -177,7 +178,8 @@ public class ElevationService {
 
     /** Container for a stitched elevation grid built from multiple tiles. */
     public static class ElevationGrid {
-        public final double[][] data; // [height][width]
+        /** Elevation values in meters; float storage keeps large grids memory efficient. */
+        public final float[][] data; // [height][width]
         public final int width;
         public final int height;
         public final int tileSize;
@@ -187,7 +189,7 @@ public class ElevationService {
         public final int centerTileX;
         public final int centerTileY;
 
-        public ElevationGrid(double[][] data, int tileSize, int tilesWide, int tilesHigh,
+        public ElevationGrid(float[][] data, int tileSize, int tilesWide, int tilesHigh,
                               int zoom, int centerTileX, int centerTileY) {
             this.data = data;
             this.height = data.length;
@@ -212,6 +214,12 @@ public class ElevationService {
     public static ElevationGrid getElevationGridAround(double latDeg, double lonDeg, int zoom,
                                                        int radiusTiles, AreaShape shape,
                                                        TileCache cache) throws IOException {
+        return getElevationGridAround(latDeg, lonDeg, zoom, radiusTiles, shape, cache, current -> { });
+    }
+
+    public static ElevationGrid getElevationGridAround(double latDeg, double lonDeg, int zoom,
+                                                       int radiusTiles, AreaShape shape,
+                                                       TileCache cache, IntConsumer tileProgress) throws IOException {
         if (cache == null) throw new IllegalArgumentException("TileCache must not be null");
         if (radiusTiles < 0) throw new IllegalArgumentException("radiusTiles must be >= 0");
 
@@ -242,14 +250,17 @@ public class ElevationService {
         int totalH = tilesSpan * tileH;
 
         // Initialize data with NaN to easily mark missing/unused cells (e.g., outside circle or y clamp)
-        double[][] data = new double[totalH][totalW];
+        float[][] data = new float[totalH][totalW];
         for (int r = 0; r < totalH; r++) {
-            Arrays.fill(data[r], Double.NaN);
+            Arrays.fill(data[r], Float.NaN);
         }
 
         int maxYIndex = (int)n - 1; // valid y: [0, n-1]
+        int tileNumber = 0;
+        int totalTiles = tilesSpan * tilesSpan;
         for (int dy = -radiusTiles; dy <= radiusTiles; dy++) {
             for (int dx = -radiusTiles; dx <= radiusTiles; dx++) {
+                tileNumber++;
                 if (shape == AreaShape.CIRCLE) {
                     // Improved tiled circle selection: include a tile if its square (size 1x1 tiles)
                     // INTERSECTS the circle of radius `radiusTiles` centered at the grid center.
@@ -258,12 +269,14 @@ public class ElevationService {
                     double ax = Math.max(Math.abs(dx) - 0.5, 0.0);
                     double ay = Math.max(Math.abs(dy) - 0.5, 0.0);
                     if ((ax * ax + ay * ay) > (radiusTiles * radiusTiles)) {
+                        tileProgress.accept(tileNumber);
                         continue; // skip tiles whose square lies completely outside the circle
                     }
                 }
                 int tx = wrapInt(centerX + dx, (int)n); // wrap across antimeridian
                 int ty = centerY + dy;
                 if (ty < 0 || ty > maxYIndex) {
+                    tileProgress.accept(tileNumber);
                     continue; // outside Web Mercator vertical bounds
                 }
 
@@ -284,9 +297,10 @@ public class ElevationService {
                         int col = destX0 + px;
                         if (col < 0 || col >= totalW) continue;
                         double elev = ElevationDecoder.getElevation(img, px, py);
-                        data[row][col] = elev;
+                        data[row][col] = (float) elev;
                     }
                 }
+                tileProgress.accept(tileNumber);
             }
         }
 
@@ -306,17 +320,23 @@ public class ElevationService {
      * If min == max (flat), all non-NaN pixels will be mid-gray (128).
      */
     public static BufferedImage elevationGridToImage(ElevationGrid grid, double min, double max) {
+        return elevationGridToImage(grid, min, max, current -> { });
+    }
+
+    public static BufferedImage elevationGridToImage(ElevationGrid grid, double min, double max,
+                                                     IntConsumer progress) {
         int w = grid.width;
         int h = grid.height;
         BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
         double range = max - min;
         boolean flat = range == 0.0 || Double.isNaN(range) || Double.isInfinite(range);
+        int[] pixels = new int[w];
         for (int y = 0; y < h; y++) {
-            double[] row = grid.data[y];
+            float[] row = grid.data[y];
             for (int x = 0; x < w; x++) {
                 double v = row[x];
                 if (Double.isNaN(v)) {
-                    img.setRGB(x, y, 0x00000000); // fully transparent
+                    pixels[x] = 0x00000000; // fully transparent
                 } else {
                     int gray;
                     if (flat) {
@@ -327,9 +347,11 @@ public class ElevationService {
                         gray = (int)Math.round(t * 255.0);
                     }
                     int argb = (0xFF << 24) | (gray << 16) | (gray << 8) | gray;
-                    img.setRGB(x, y, argb);
+                    pixels[x] = argb;
                 }
             }
+            img.setRGB(0, y, w, 1, pixels, 0, w);
+            progress.accept(y + 1);
         }
         return img;
     }
@@ -338,6 +360,10 @@ public class ElevationService {
      * Auto-scales the ElevationGrid to grayscale by scanning for min/max (ignoring NaN).
      */
     public static BufferedImage elevationGridToImage(ElevationGrid grid) {
+        return elevationGridToImage(grid, current -> { });
+    }
+
+    public static BufferedImage elevationGridToImage(ElevationGrid grid, IntConsumer progress) {
         // First pass: compute min, max, count, and sum for mean (ignoring NaN)
         double min = Double.POSITIVE_INFINITY;
         double max = Double.NEGATIVE_INFINITY;
@@ -346,7 +372,7 @@ public class ElevationService {
         int h = grid.height;
         int w = grid.width;
         for (int y = 0; y < h; y++) {
-            double[] row = grid.data[y];
+            float[] row = grid.data[y];
             for (int x = 0; x < w; x++) {
                 double v = row[x];
                 if (!Double.isNaN(v)) {
@@ -366,7 +392,7 @@ public class ElevationService {
         // Second pass: compute standard deviation (ignoring NaN)
         double sqSum = 0.0;
         for (int y = 0; y < h; y++) {
-            double[] row = grid.data[y];
+            float[] row = grid.data[y];
             for (int x = 0; x < w; x++) {
                 double v = row[x];
                 if (!Double.isNaN(v)) {
@@ -411,15 +437,54 @@ public class ElevationService {
             winMax = winMin + eps;
         }
 
-        return elevationGridToImage(grid, winMin, winMax);
+        return elevationGridToImage(grid, winMin, winMax, progress);
     }
 
-    /**
-     * Writes the ElevationGrid to a PNG file using auto min/max scaling.
-     */
+    /** Writes the ElevationGrid using the output file extension and auto min/max scaling. */
     public static void saveElevationGridAsPng(ElevationGrid grid, File outFile) throws IOException {
         BufferedImage img = elevationGridToImage(grid);
-        ImageIO.write(img, "png", outFile);
+        writeImage(img, outFile);
+    }
+
+    public static void saveElevationGridAsPng(ElevationGrid grid, File outFile,
+                                              IntConsumer progress) throws IOException {
+        BufferedImage img = elevationGridToImage(grid, progress);
+        writeImage(img, outFile);
+    }
+
+    private static String imageFormat(File outFile) {
+        String name = outFile.getName();
+        int dot = name.lastIndexOf('.');
+        String extension = dot >= 0 ? name.substring(dot + 1).toLowerCase() : "png";
+        if (extension.equals("jpeg")) extension = "jpg";
+        if (!extension.equals("png") && !extension.equals("jpg") && !extension.equals("webp")) {
+            throw new IllegalArgumentException("Unsupported output format ." + extension
+                    + "; use .png, .jpg, .jpeg, or .webp (JXL is not currently supported)");
+        }
+        return extension;
+    }
+
+    private static void writeImage(BufferedImage image, File outFile) throws IOException {
+        String format = imageFormat(outFile);
+        BufferedImage toWrite = image;
+        if (format.equals("jpg")) {
+            toWrite = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);
+            Graphics2D g = toWrite.createGraphics();
+            try {
+                g.setColor(Color.WHITE);
+                g.fillRect(0, 0, toWrite.getWidth(), toWrite.getHeight());
+                g.drawImage(image, 0, 0, null);
+            } finally {
+                g.dispose();
+            }
+        }
+        if (!ImageIO.write(toWrite, format, outFile)) {
+            throw new IOException("No ImageIO writer is available for ." + format);
+        }
+    }
+
+    public static void writeImageFile(BufferedImage image, File outFile) throws IOException {
+        writeImage(image, outFile);
     }
 
     /**
@@ -428,11 +493,12 @@ public class ElevationService {
      * is set to NaN in the returned grid. Visible cells retain their original elevation values.
      *
      * Implementation details:
-     * - First, a curvature-adjusted copy of the grid is computed with the same observer parameters.
-     *   This converts s^2/(2R) curvature drop into an equivalent lowering of distant terrain.
+     * - Terrain is compared using spherical observer-to-sample geometry, so curvature is applied
+     *   continuously without materializing a curvature-adjusted copy of the grid.
      * - Then we cast rays uniformly around the observer (angular sweep). Along each ray, we track
-     *   the maximum apparent slope (elevation above the observer eye level divided by ground distance).
-     *   A point is visible if its slope is greater than or equal to all previous slopes along that ray.
+     *   the maximum apparent sight angle, sampling each traversed cell at multiple points with
+     *   bilinear DEM interpolation. A cell is visible if any sampled point rises above all previous
+     *   terrain on that ray.
      * - The final output grid contains NaN for occluded points, and retains original elevations for visible points.
      */
     public static ElevationGrid applyLineOfSightMask(ElevationGrid grid,
@@ -456,17 +522,29 @@ public class ElevationService {
                                                      double observerLonDeg,
                                                      ObserverHeightMode mode,
                                                      Double heightMeters,
+                                                      TileCache cache,
+                                                      int angleBins) throws IOException {
+        return applyLineOfSightMask(grid, observerLatDeg, observerLonDeg, mode, heightMeters, cache, angleBins, null);
+    }
+
+    public static ElevationGrid applyLineOfSightMask(ElevationGrid grid,
+                                                     double observerLatDeg,
+                                                     double observerLonDeg,
+                                                     ObserverHeightMode mode,
+                                                     Double heightMeters,
                                                      TileCache cache,
-                                                     int angleBins) throws IOException {
-        boolean[][] visible = VisibilityEngine.computeVisibilityMask(grid, observerLatDeg, observerLonDeg, mode, heightMeters, cache, angleBins);
+                                                     int angleBins,
+                                                     IntConsumer progress) throws IOException {
+        boolean[][] visible = VisibilityEngine.computeVisibilityMask(
+                grid, observerLatDeg, observerLonDeg, mode, heightMeters, cache, angleBins, progress);
         int w = grid.width, h = grid.height;
-        double[][] out = new double[h][w];
+        float[][] out = new float[h][w];
         for (int y = 0; y < h; y++) {
-            double[] rowIn = grid.data[y];
-            double[] rowOut = out[y];
+            float[] rowIn = grid.data[y];
+            float[] rowOut = out[y];
             boolean[] visRow = visible[y];
             for (int x = 0; x < w; x++) {
-                rowOut[x] = (visRow != null && visRow[x]) ? rowIn[x] : Double.NaN;
+                rowOut[x] = (visRow != null && visRow[x]) ? rowIn[x] : Float.NaN;
             }
         }
         return new ElevationGrid(out, grid.tileSize, grid.tilesWide, grid.tilesHigh, grid.zoom, grid.centerTileX, grid.centerTileY);
@@ -487,10 +565,8 @@ public class ElevationService {
      * Applies earth curvature drop to an ElevationGrid with customization.
      * - centerLatDeg: latitude (deg) at grid center, used to compute ground resolution.
      * - earthRadiusMeters: sphere radius for curvature model.
-     * - considerViewerEyeHeight: if true, subtracts the straight-line eye height horizon effect by
-     *   not lowering pixels within the geometric horizon distance d_h = sqrt(2 R h + h^2).
-     *   Practically, this prevents over-lowering very near the viewer when modeling a raised eye.
-     * - viewerEyeHeightMeters: viewer eye height above ground (used only if considerViewerEyeHeight is true).
+     * - considerViewerEyeHeight and viewerEyeHeightMeters are retained for API compatibility.
+     *   Observer height affects line-of-sight calculations, not the curvature drop itself.
      *
      * Returns a NEW ElevationGrid; the original grid is not modified.
      */
@@ -501,7 +577,7 @@ public class ElevationService {
                                                         double viewerEyeHeightMeters) {
         int w = grid.width;
         int h = grid.height;
-        double[][] out = new double[h][w];
+        float[][] out = new float[h][w];
 
         // Ground resolution (meters per pixel) at latitude for Web Mercator
         double metersPerPixel = (2.0 * Math.PI * earthRadiusMeters * Math.cos(Math.toRadians(centerLatDeg)))
@@ -511,19 +587,13 @@ public class ElevationService {
         double cx = (w - 1) / 2.0;
         double cy = (h - 1) / 2.0;
 
-        // Optional horizon distance if viewer eye height is considered
-        double horizonMeters = 0.0;
-        if (considerViewerEyeHeight && viewerEyeHeightMeters > 0) {
-            horizonMeters = Math.sqrt(2.0 * earthRadiusMeters * viewerEyeHeightMeters + viewerEyeHeightMeters * viewerEyeHeightMeters);
-        }
-
         for (int y = 0; y < h; y++) {
-            double[] inRow = grid.data[y];
-            double[] outRow = out[y];
+            float[] inRow = grid.data[y];
+            float[] outRow = out[y];
             for (int x = 0; x < w; x++) {
                 double v = inRow[x];
                 if (Double.isNaN(v)) {
-                    outRow[x] = Double.NaN;
+                    outRow[x] = Float.NaN;
                     continue;
                 }
                 double dx = (x - cx);
@@ -531,13 +601,8 @@ public class ElevationService {
                 double sPixels = Math.hypot(dx, dy);
                 double sMeters = sPixels * metersPerPixel;
 
-                // Optionally skip curvature within horizon distance (viewer height)
-                if (horizonMeters > 0.0 && sMeters <= horizonMeters) {
-                    outRow[x] = v; // unchanged within horizon
-                } else {
-                    double drop = (sMeters * sMeters) / (2.0 * earthRadiusMeters);
-                    outRow[x] = v - drop;
-                }
+                double drop = (sMeters * sMeters) / (2.0 * earthRadiusMeters);
+                outRow[x] = (float) (v - drop);
             }
         }
         return new ElevationGrid(out, grid.tileSize, grid.tilesWide, grid.tilesHigh, grid.zoom, grid.centerTileX, grid.centerTileY);
@@ -645,11 +710,11 @@ public class ElevationService {
         int startY = (dyTiles + radiusTiles) * tileSize;
         if (startX < 0 || startY < 0 || startX + tileSize > grid.width || startY + tileSize > grid.height) {
             // Out of bounds; return empty NaN tile
-            double[][] blank = new double[tileSize][tileSize];
-            for (int y = 0; y < tileSize; y++) java.util.Arrays.fill(blank[y], Double.NaN);
+            float[][] blank = new float[tileSize][tileSize];
+            for (int y = 0; y < tileSize; y++) java.util.Arrays.fill(blank[y], Float.NaN);
             return new ElevationGrid(blank, tileSize, 1, 1, grid.zoom, grid.centerTileX, grid.centerTileY);
         }
-        double[][] out = new double[tileSize][tileSize];
+        float[][] out = new float[tileSize][tileSize];
         for (int y = 0; y < tileSize; y++) {
             System.arraycopy(grid.data[startY + y], startX, out[y], 0, tileSize);
         }
@@ -662,6 +727,11 @@ public class ElevationService {
      * Builds a stitched Carto basemap image that matches the pixel dimensions of the given elevation grid.
      */
     public static BufferedImage buildCartoBaseMapImage(ElevationGrid grid, CartoTileCache cartoCache) throws IOException {
+        return buildCartoBaseMapImage(grid, cartoCache, current -> { });
+    }
+
+    public static BufferedImage buildCartoBaseMapImage(ElevationGrid grid, CartoTileCache cartoCache,
+                                                       IntConsumer progress) throws IOException {
         if (cartoCache == null) throw new IllegalArgumentException("CartoTileCache must not be null");
         int tilesSpan = grid.tilesWide; // assumes square grid tilesWide == tilesHigh
         int tileSize = grid.tileSize;
@@ -678,14 +748,19 @@ public class ElevationService {
                     int tx = wrapInt(grid.centerTileX + dx, n);
                     int ty = grid.centerTileY + dy;
                     if (ty < 0 || ty > maxYIndex) {
+                        progress.accept((dy + radiusTiles) * tilesSpan + dx + radiusTiles + 1);
                         continue;
                     }
                     File tf = cartoCache.getTile(grid.zoom, tx, ty);
                     BufferedImage img = ImageIO.read(tf);
-                    if (img == null) continue;
+                    if (img == null) {
+                        progress.accept((dy + radiusTiles) * tilesSpan + dx + radiusTiles + 1);
+                        continue;
+                    }
                     int destX0 = (dx + radiusTiles) * tileSize;
                     int destY0 = (dy + radiusTiles) * tileSize;
                     g.drawImage(img, destX0, destY0, tileSize, tileSize, null);
+                    progress.accept((dy + radiusTiles) * tilesSpan + dx + radiusTiles + 1);
                 }
             }
         } finally {
@@ -699,27 +774,38 @@ public class ElevationService {
      * leaving occluded pixels (NaN) unchanged so the basemap shows through.
      */
     public static BufferedImage overlayLosOnBase(ElevationGrid losMaskedGrid, BufferedImage base, Color overlayColor) {
+        return overlayLosOnBase(losMaskedGrid, base, overlayColor, current -> { });
+    }
+
+    public static BufferedImage overlayLosOnBase(ElevationGrid losMaskedGrid, BufferedImage base,
+                                                 Color overlayColor, IntConsumer progress) {
         if (base.getWidth() != losMaskedGrid.width || base.getHeight() != losMaskedGrid.height) {
             throw new IllegalArgumentException("Base image size must match grid dimensions");
         }
         BufferedImage out = new BufferedImage(base.getWidth(), base.getHeight(), BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = out.createGraphics();
-        try {
-            g.drawImage(base, 0, 0, null);
-            // Prepare overlay color with alpha
-            g.setComposite(AlphaComposite.SrcOver);
-            g.setColor(overlayColor);
-            // Draw per-pixel rectangles for visible (non-NaN) cells
-            for (int y = 0; y < losMaskedGrid.height; y++) {
-                double[] row = losMaskedGrid.data[y];
-                for (int x = 0; x < losMaskedGrid.width; x++) {
-                    if (!Double.isNaN(row[x])) {
-                        g.fillRect(x, y, 1, 1);
-                    }
+        int width = base.getWidth();
+        int alpha = overlayColor.getAlpha();
+        int inverseAlpha = 255 - alpha;
+        int overlayRed = overlayColor.getRed();
+        int overlayGreen = overlayColor.getGreen();
+        int overlayBlue = overlayColor.getBlue();
+        int[] pixels = new int[width];
+        for (int y = 0; y < losMaskedGrid.height; y++) {
+            base.getRGB(0, y, width, 1, pixels, 0, width);
+            float[] row = losMaskedGrid.data[y];
+            for (int x = 0; x < width; x++) {
+                if (!Double.isNaN(row[x])) {
+                    int basePixel = pixels[x];
+                    int baseAlpha = (basePixel >>> 24) & 0xff;
+                    int outAlpha = alpha + (baseAlpha * inverseAlpha + 127) / 255;
+                    int red = (overlayRed * alpha + ((basePixel >>> 16) & 0xff) * inverseAlpha + 127) / 255;
+                    int green = (overlayGreen * alpha + ((basePixel >>> 8) & 0xff) * inverseAlpha + 127) / 255;
+                    int blue = (overlayBlue * alpha + (basePixel & 0xff) * inverseAlpha + 127) / 255;
+                    pixels[x] = (outAlpha << 24) | (red << 16) | (green << 8) | blue;
                 }
             }
-        } finally {
-            g.dispose();
+            out.setRGB(0, y, width, 1, pixels, 0, width);
+            progress.accept(y + 1);
         }
         return out;
     }
@@ -728,17 +814,33 @@ public class ElevationService {
      * Convenience method to save a Carto basemap with LOS mask overlay in semi-transparent red.
      */
     public static void saveLosOverlayOnCarto(ElevationGrid losMaskedGrid, CartoTileCache cartoCache, File outFile) throws IOException {
-        BufferedImage base = buildCartoBaseMapImage(losMaskedGrid, cartoCache);
+        saveLosOverlayOnCarto(losMaskedGrid, cartoCache, outFile, current -> { });
+    }
+
+    public static void saveLosOverlayOnCarto(ElevationGrid losMaskedGrid, CartoTileCache cartoCache,
+                                             File outFile, IntConsumer tileProgress) throws IOException {
+        saveLosOverlayOnCarto(losMaskedGrid, cartoCache, outFile, tileProgress, current -> { });
+    }
+
+    public static void saveLosOverlayOnCarto(ElevationGrid losMaskedGrid, CartoTileCache cartoCache,
+                                             File outFile, IntConsumer tileProgress,
+                                             IntConsumer renderProgress) throws IOException {
+        BufferedImage base = buildCartoBaseMapImage(losMaskedGrid, cartoCache, tileProgress);
         // Semi-transparent red (alpha ~ 128)
         Color redOverlay = new Color(255, 0, 0, 96);
-        BufferedImage composited = overlayLosOnBase(losMaskedGrid, base, redOverlay);
-        ImageIO.write(composited, "png", outFile);
+        BufferedImage composited = overlayLosOnBase(losMaskedGrid, base, redOverlay, renderProgress);
+        writeImage(composited, outFile);
     }
 
     /**
      * Builds a stitched Thunderforest basemap image that matches the pixel dimensions of the given elevation grid.
      */
     public static BufferedImage buildThunderforestBaseMapImage(ElevationGrid grid, ThunderforestTileCache tfCache) throws IOException {
+        return buildThunderforestBaseMapImage(grid, tfCache, current -> { });
+    }
+
+    public static BufferedImage buildThunderforestBaseMapImage(ElevationGrid grid, ThunderforestTileCache tfCache,
+                                                               IntConsumer progress) throws IOException {
         if (tfCache == null) throw new IllegalArgumentException("ThunderforestTileCache must not be null");
         int tilesSpan = grid.tilesWide; // assumes square grid tilesWide == tilesHigh
         int tileSize = grid.tileSize;
@@ -755,14 +857,19 @@ public class ElevationService {
                     int tx = wrapInt(grid.centerTileX + dx, n);
                     int ty = grid.centerTileY + dy;
                     if (ty < 0 || ty > maxYIndex) {
+                        progress.accept((dy + radiusTiles) * tilesSpan + dx + radiusTiles + 1);
                         continue;
                     }
                     File tf = tfCache.getTile(grid.zoom, tx, ty);
                     BufferedImage img = ImageIO.read(tf);
-                    if (img == null) continue;
+                    if (img == null) {
+                        progress.accept((dy + radiusTiles) * tilesSpan + dx + radiusTiles + 1);
+                        continue;
+                    }
                     int destX0 = (dx + radiusTiles) * tileSize;
                     int destY0 = (dy + radiusTiles) * tileSize;
                     g.drawImage(img, destX0, destY0, tileSize, tileSize, null);
+                    progress.accept((dy + radiusTiles) * tilesSpan + dx + radiusTiles + 1);
                 }
             }
         } finally {
@@ -775,11 +882,22 @@ public class ElevationService {
      * Convenience method to save a Thunderforest basemap with LOS mask overlay in semi-transparent red.
      */
     public static void saveLosOverlayOnThunderforest(ElevationGrid losMaskedGrid, ThunderforestTileCache tfCache, File outFile) throws IOException {
-        BufferedImage base = buildThunderforestBaseMapImage(losMaskedGrid, tfCache);
+        saveLosOverlayOnThunderforest(losMaskedGrid, tfCache, outFile, current -> { });
+    }
+
+    public static void saveLosOverlayOnThunderforest(ElevationGrid losMaskedGrid, ThunderforestTileCache tfCache,
+                                                     File outFile, IntConsumer tileProgress) throws IOException {
+        saveLosOverlayOnThunderforest(losMaskedGrid, tfCache, outFile, tileProgress, current -> { });
+    }
+
+    public static void saveLosOverlayOnThunderforest(ElevationGrid losMaskedGrid, ThunderforestTileCache tfCache,
+                                                     File outFile, IntConsumer tileProgress,
+                                                     IntConsumer renderProgress) throws IOException {
+        BufferedImage base = buildThunderforestBaseMapImage(losMaskedGrid, tfCache, tileProgress);
         // Semi-transparent red (alpha ~ 128)
         Color redOverlay = new Color(255, 0, 0, 96);
-        BufferedImage composited = overlayLosOnBase(losMaskedGrid, base, redOverlay);
-        ImageIO.write(composited, "png", outFile);
+        BufferedImage composited = overlayLosOnBase(losMaskedGrid, base, redOverlay, renderProgress);
+        writeImage(composited, outFile);
     }
 
     /**
@@ -790,9 +908,30 @@ public class ElevationService {
                                                      File outFile,
                                                      double observerLatDeg,
                                                      double observerLonDeg) throws IOException {
-        BufferedImage base = buildThunderforestBaseMapImage(losMaskedGrid, tfCache);
+        saveLosOverlayOnThunderforest(losMaskedGrid, tfCache, outFile, observerLatDeg, observerLonDeg,
+                current -> { });
+    }
+
+    public static void saveLosOverlayOnThunderforest(ElevationGrid losMaskedGrid,
+                                                     ThunderforestTileCache tfCache,
+                                                     File outFile,
+                                                     double observerLatDeg,
+                                                     double observerLonDeg,
+                                                     IntConsumer tileProgress) throws IOException {
+        saveLosOverlayOnThunderforest(losMaskedGrid, tfCache, outFile, observerLatDeg, observerLonDeg,
+                tileProgress, current -> { });
+    }
+
+    public static void saveLosOverlayOnThunderforest(ElevationGrid losMaskedGrid,
+                                                     ThunderforestTileCache tfCache,
+                                                     File outFile,
+                                                     double observerLatDeg,
+                                                     double observerLonDeg,
+                                                     IntConsumer tileProgress,
+                                                     IntConsumer renderProgress) throws IOException {
+        BufferedImage base = buildThunderforestBaseMapImage(losMaskedGrid, tfCache, tileProgress);
         Color redOverlay = new Color(255, 0, 0, 96);
-        BufferedImage composited = overlayLosOnBase(losMaskedGrid, base, redOverlay);
+        BufferedImage composited = overlayLosOnBase(losMaskedGrid, base, redOverlay, renderProgress);
 
         // Draw observer marker
         Graphics2D g = composited.createGraphics();
@@ -814,6 +953,6 @@ public class ElevationService {
             g.dispose();
         }
 
-        ImageIO.write(composited, "png", outFile);
+        writeImage(composited, outFile);
     }
 }

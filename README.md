@@ -1,6 +1,6 @@
 # VERA
 
-VERA is a command-line utility for retrieving and composing terrain elevations from Mapzen Terrarium tiles, exporting stitched grids to PNG, and applying Earth-curvature and line-of-sight analysis.
+VERA is a command-line utility for retrieving and composing terrain elevations from Mapzen Terrarium tiles, exporting stitched grids to PNG, JPEG, WebP, or georeferenced KMZ, and applying Earth-curvature and line-of-sight analysis.
 
 ## Quick start
 
@@ -9,6 +9,9 @@ Run VERA with Gradle using `./gradlew run --args="<command> <options>"`.
 ```bash
 # Print elevation at a coordinate
 ./gradlew run --args="elevation --lat 42.3263 --lon -113.6556"
+
+# Generate a georeferenced line-of-sight KMZ for Google Earth
+./gradlew run --args="los --lat 42.3263 --lon -113.6556 --agl 10 --out viewshed.kmz"
 
 # Generate a line-of-sight PNG
 ./gradlew run --args="los --lat 42.3263 --lon -113.6556 --agl 10 --out los.png"
@@ -41,10 +44,21 @@ Builds an elevation grid, applies a line-of-sight mask, and saves it as a PNG.
 - `--agl`: observer height above ground in meters, default `10`
 - `--radius`: grid radius in tiles, default `22`
 - `--angleBins`: angular samples, default `1440`
-- `--out`: output path, default `./los.png`
+- `--out`: output path, default `./los.png`; format is selected by extension: `.png`, `.jpg`/`.jpeg`, `.webp`, or `.kmz`
+- `--elevation-out`: optionally save the stitched, unmasked elevation grid as a grayscale image
+- `--curvature-out`: optionally save the observer-relative curvature-adjusted grid as a grayscale image
 - `--overlay`: render the result over a Carto or Thunderforest basemap
 - `--tfKey`: Thunderforest key; `--cartoKey` can be used as the fallback provider
 - `--cache`, `--tfCache`, `--cartoCache`: cache directories for the providers
+
+PNG preserves transparency, while JPEG is written with a white background. WebP is
+available through the bundled ImageIO plugin. JPEG XL (`.jxl`) is not currently
+supported because the project does not include a JPEG XL ImageIO writer.
+
+KMZ contains a translucent red PNG and a KML `GroundOverlay` with the grid’s geographic
+bounding box, so it can be opened directly in Google Earth Desktop. Visible viewshed
+cells use the same red transparency as `--overlay`; occluded cells remain transparent. KMZ is supported
+for the viewshed export without `--overlay`; basemap compositing remains image-only.
 
 ### `prefetch`
 

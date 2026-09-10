@@ -1,11 +1,14 @@
 package com.sidpatchy;
 
 import com.sidpatchy.Tile.ElevationService;
+import com.sidpatchy.Tile.CurvatureModel;
 import com.sidpatchy.Tile.TileCache;
 import com.sidpatchy.Tile.ThunderforestTileCache;
 
+import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -17,7 +20,10 @@ public class Main {
                 "                                           Print elevation (meters) at lat/lon\n" +
                 "  los --lat <v> --lon <v> [--zoom <z>] [--agl <m>] [--radius <tiles>]\n" +
                 "      [--angleBins <n>] [--overlay] [--tfKey <key>] [--out <file>]\n" +
-                "                                           Generate LOS PNG (optionally overlay on TF)\n" +
+                "      [--elevation-out <file>] [--curvature-out <file>]\n" +
+                "                                           Generate LOS image/KMZ (optionally overlay on TF)\n" +
+                "                                           Optionally export stitched elevation/curvature maps\n" +
+                "                                           Output formats: .png, .jpg/.jpeg, .webp, .kmz\n" +
                 "  prefetch --type <terrain|carto|thunder> --minLat <v> --minLon <v> --maxLat <v> --maxLon <v>\n" +
                 "           [--zoom <z> | --zMin <z> --zMax <z>] [--cache <dir>] [--tfKey <key>]\n" +
                 "                                           Bulk download tiles into local cache\n");
@@ -50,6 +56,7 @@ public class Main {
         }
 
         String cmd = args[0].toLowerCase();
+        CliProgress progress = CliProgress.open();
         switch (cmd) {
             case "elevation": {
                 Map<String, String> p = parseArgs(args);
@@ -57,10 +64,12 @@ public class Main {
                 double lon = Double.parseDouble(p.getOrDefault("lon", Double.toString(-113.6556245641089)));
                 int zoom = Integer.parseInt(p.getOrDefault("zoom", "12"));
                 String cacheDir = p.getOrDefault("cache", "./terrain_cache");
-                TileCache cache = new TileCache(cacheDir);
-                double elevation = ElevationService.getElevationAt(lat, lon, zoom, cache);
-                System.out.println("Elevation(m): " + elevation);
-                break;
+                 TileCache cache = new TileCache(cacheDir);
+                 double elevation = ElevationService.getElevationAt(lat, lon, zoom, cache);
+                 progress.complete("Elevation lookup");
+                 System.out.println("Elevation(m): " + elevation);
+                 progress.close();
+                 break;
             }
             case "los": {
                 Map<String, String> p = parseArgs(args);
@@ -72,33 +81,110 @@ public class Main {
                 int angleBins = Integer.parseInt(p.getOrDefault("angleBins", "1440"));
                 boolean overlay = Boolean.parseBoolean(p.getOrDefault("overlay", "false"));
                 String out = p.getOrDefault("out", overlay ? "./los_overlay.png" : "./los.png");
+                boolean kmz = out.toLowerCase().endsWith(".kmz");
+
+                if (kmz && overlay) {
+                    System.err.println("--out .kmz currently supports viewshed exports without --overlay");
+                    progress.close();
+                    return;
+                }
 
                 TileCache cache = new TileCache(p.getOrDefault("cache", "./terrain_cache"));
-                ElevationService.ElevationGrid grid = ElevationService.getElevationGridAround(
-                        lat, lon, zoom, radius, ElevationService.AreaShape.SQUARE, cache);
+                ElevationService.ElevationGrid grid;
+                int elevationTiles = (radius * 2 + 1) * (radius * 2 + 1);
+                progress.bar("Loading elevation tiles", 0, elevationTiles);
+                grid = ElevationService.getElevationGridAround(
+                        lat, lon, zoom, radius, ElevationService.AreaShape.SQUARE, cache,
+                        current -> progress.bar("Loading elevation tiles", current, elevationTiles));
+                progress.complete("Loading elevation tiles");
+                String elevationOut = p.get("elevation-out");
+                String curvatureOut = p.get("curvature-out");
+                if (elevationOut != null || curvatureOut != null) {
+                    if (elevationOut != null) {
+                        progress.bar("Rendering elevation map", 0, grid.height);
+                        BufferedImage elevationImage = ElevationService.elevationGridToImage(
+                                grid, current -> progress.bar("Rendering elevation map", current, grid.height));
+                        progress.complete("Rendering elevation map");
+                        try (CliProgress.Spinner ignored = progress.spinner("Encoding elevation map")) {
+                            ElevationService.writeImageFile(elevationImage, new File(elevationOut));
+                        }
+                        System.out.println("Saved elevation map: " + new File(elevationOut).getAbsolutePath());
+                    }
+                    if (curvatureOut != null) {
+                        progress.bar("Rendering curvature map", 0, grid.height);
+                        BufferedImage curvatureImage = CurvatureModel.observerCurvatureToImage(
+                                grid, lat, lon, ElevationService.ObserverHeightMode.AGL, agl, cache,
+                                current -> progress.bar("Rendering curvature map", current, grid.height));
+                        progress.complete("Rendering curvature map");
+                        try (CliProgress.Spinner ignored = progress.spinner("Encoding curvature map")) {
+                            ElevationService.writeImageFile(curvatureImage, new File(curvatureOut));
+                        }
+                        System.out.println("Saved curvature map: " + new File(curvatureOut).getAbsolutePath());
+                    }
+                }
+                progress.bar("Running LoS raycasts", 0, angleBins);
                 ElevationService.ElevationGrid losMasked = ElevationService.applyLineOfSightMask(
-                        grid, lat, lon, ElevationService.ObserverHeightMode.AGL, agl, cache, angleBins);
+                        grid, lat, lon, ElevationService.ObserverHeightMode.AGL, agl, cache, angleBins,
+                        current -> progress.bar("Running LoS raycasts", current, angleBins));
+                progress.complete("Running LoS raycasts");
 
                 if (overlay) {
                     String tfKey = ThunderforestTileCache.resolveApiKey(p.get("tfKey"));
                     if (tfKey != null && !tfKey.isBlank()) {
                         ThunderforestTileCache tf = new ThunderforestTileCache(
                                 p.getOrDefault("tfCache", "./thunder_cache"), tfKey);
-                        ElevationService.saveLosOverlayOnThunderforest(losMasked, tf, new File(out), lat, lon);
+                        int mapTiles = losMasked.tilesWide * losMasked.tilesHigh;
+                        progress.bar("Loading map tiles", 0, mapTiles);
+                        ElevationService.saveLosOverlayOnThunderforest(losMasked, tf, new File(out), lat, lon,
+                                current -> progress.bar("Loading map tiles", current, mapTiles),
+                                current -> {
+                                    progress.bar("Rendering LOS overlay", current, losMasked.height);
+                                    if (current >= losMasked.height) {
+                                        progress.complete("Rendering LOS overlay");
+                                        progress.bar("Writing image", 0, 1);
+                                    }
+                                });
+                        progress.complete("Loading map tiles");
+                        progress.complete("Writing image");
                     } else {
                         String cartoKey = com.sidpatchy.Tile.CartoTileCache.resolveApiKey(p.get("cartoKey"));
                         if (cartoKey == null || cartoKey.isBlank()) {
                             System.err.println("--overlay requires a Thunderforest or Carto API key");
+                            progress.close();
                             return;
                         }
                         com.sidpatchy.Tile.CartoTileCache carto = new com.sidpatchy.Tile.CartoTileCache(
                                 p.getOrDefault("cartoCache", "./carto_cache"), cartoKey);
-                        ElevationService.saveLosOverlayOnCarto(losMasked, carto, new File(out));
+                        int mapTiles = losMasked.tilesWide * losMasked.tilesHigh;
+                        progress.bar("Loading map tiles", 0, mapTiles);
+                        ElevationService.saveLosOverlayOnCarto(losMasked, carto, new File(out),
+                                current -> progress.bar("Loading map tiles", current, mapTiles),
+                                current -> {
+                                    progress.bar("Rendering LOS overlay", current, losMasked.height);
+                                    if (current >= losMasked.height) {
+                                        progress.complete("Rendering LOS overlay");
+                                        progress.bar("Writing image", 0, 1);
+                                    }
+                                });
+                        progress.complete("Loading map tiles");
+                        progress.complete("Writing image");
                     }
                 } else {
-                    ElevationService.saveElevationGridAsPng(losMasked, new File(out));
+                    progress.bar("Rendering elevation image", 0, losMasked.height);
+                    BufferedImage image = ElevationService.elevationGridToImage(
+                            losMasked,
+                            current -> progress.bar("Rendering elevation image", current, losMasked.height));
+                    progress.complete("Rendering elevation image");
+                    try (CliProgress.Spinner ignored = progress.spinner("Encoding image")) {
+                        if (kmz) {
+                            KmzExporter.writeViewshed(Path.of(out), image, losMasked);
+                        } else {
+                            ElevationService.writeImageFile(image, new File(out));
+                        }
+                    }
                 }
                 System.out.println("Saved: " + new File(out).getAbsolutePath());
+                progress.close();
                 break;
             }
             case "prefetch": {
@@ -117,6 +203,7 @@ public class Main {
                 String tfKey = p.get("tfKey");
                 if (type.equals("thunder") && (tfKey == null || tfKey.isBlank())) {
                     System.err.println("--type thunder requires --tfKey <key>");
+                    progress.close();
                     return;
                 }
 
@@ -182,8 +269,10 @@ public class Main {
                                                 new com.sidpatchy.Tile.ThunderforestTileCache(cacheDir, tfKey).getTile(z, x, y);
                                             }
                                             success++;
+                                            progress.bar("Downloading tiles", success, total);
                                         } catch (Exception e) {
                                             System.err.println("Failed z="+z+" x="+x+" y="+y+": "+e.getMessage());
+                                            progress.bar("Downloading tiles", success, total);
                                         }
                                     }
                                 }
@@ -201,19 +290,24 @@ public class Main {
                                             new com.sidpatchy.Tile.ThunderforestTileCache(cacheDir, tfKey).getTile(z, x, y);
                                         }
                                         success++;
+                                        progress.bar("Downloading tiles", success, total);
                                     } catch (Exception e) {
                                         System.err.println("Failed z="+z+" x="+x+" y="+y+": "+e.getMessage());
+                                        progress.bar("Downloading tiles", success, total);
                                     }
                                 }
                             }
                         }
                     }
                 }
+                progress.complete("Downloading tiles");
                 System.out.println("Prefetch complete. Downloaded " + success + "/" + total + " tiles to " + cacheDir);
+                progress.close();
                 break;
             }
             default:
                 printUsage();
+                progress.close();
         }
     }
 }
