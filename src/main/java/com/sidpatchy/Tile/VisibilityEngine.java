@@ -43,10 +43,7 @@ public final class VisibilityEngine {
             TileCache cache,
             int angleBins,
             IntConsumer progress) throws IOException {
-        if (angleBins < 8) angleBins = 8;
-        // Allow high angular resolution; cap generously to prevent runaway allocations
-        if (angleBins > 200000) angleBins = 200000;
-        final int progressTotal = angleBins;
+        angleBins = Math.max(8, Math.min(angleBins, 200000));
 
         // Observer pixel
         double[] obsPx = latLonToGridPixel(grid, observerLatDeg, observerLonDeg);
@@ -81,7 +78,8 @@ public final class VisibilityEngine {
         // That leaves unvisited diagonal bands even when the angular count
         // looks high. Increase the sweep only as far as needed to keep the
         // outermost ray footprint approximately one pixel wide.
-        final int rayCount = Math.max(angleBins, minimumRayCount(obsPx[0], obsPx[1], w, h));
+        final int rayCount = Math.max(angleBins,
+                minimumRayCount(obsPx[0], obsPx[1], w, h));
         AtomicInteger completed = progress == null ? null : new AtomicInteger();
         Object progressLock = progress == null ? null : new Object();
         IntStream.range(0, rayCount).parallel().forEach(ai -> {
@@ -92,10 +90,8 @@ public final class VisibilityEngine {
                     context, visible);
             if (progress != null) {
                 int raysCompleted = completed.incrementAndGet();
-                int current = Math.min(progressTotal,
-                        (int) Math.ceil(raysCompleted * (double) progressTotal / rayCount));
                 synchronized (progressLock) {
-                    progress.accept(current);
+                    progress.accept(raysCompleted);
                 }
             }
         });
@@ -106,6 +102,20 @@ public final class VisibilityEngine {
         castRayDDA(grid, obsPx[0], obsPx[1], -1.0, 0.0, context, visible);
         castRayDDA(grid, obsPx[0], obsPx[1], 0.0, -1.0, context, visible);
         return visible;
+    }
+
+    /**
+     * Returns the actual azimuth-ray count used for a grid and requested count.
+     * The sweep is increased when the outermost grid corner would otherwise be
+     * more than one pixel away from the neighboring ray.
+     */
+    public static int effectiveRayCount(ElevationService.ElevationGrid grid,
+                                        double observerLatDeg, double observerLonDeg,
+                                        int angleBins) {
+        int normalizedAngleBins = Math.max(8, Math.min(angleBins, 200000));
+        double[] observer = latLonToGridPixel(grid, observerLatDeg, observerLonDeg);
+        return Math.max(normalizedAngleBins,
+                minimumRayCount(observer[0], observer[1], grid.width, grid.height));
     }
 
     private static int minimumRayCount(double observerX, double observerY, int width, int height) {

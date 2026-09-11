@@ -25,6 +25,34 @@ Run VERA with Gradle using `./gradlew run --args="<command> <options>"`.
 
 Run VERA without arguments to print the complete option reference.
 
+## HTTP API
+
+Start the asynchronous Javalin API with:
+
+```bash
+./gradlew run --args="server --port 7070 --cache ./terrain_cache --output ./api_output"
+```
+
+Submit a viewshed job with `POST /api/viewsheds`:
+
+```json
+{
+  "lat": 42.3263,
+  "lon": -113.6556,
+  "agl": 10,
+  "radiusMeters": 40000,
+  "zoom": 12,
+  "angleBins": 1440,
+  "format": "png"
+}
+```
+
+The response is `202 Accepted` and contains `statusUrl` and `resultUrl`. Poll
+the status URL to receive `status`, `phase`, `current`, `total`, and `percent`
+while the job runs. When `status` is `completed`, download `resultUrl` to get
+the PNG (or use `"format": "kmz"` for a georeferenced KMZ). Failed jobs report
+an `error` field from the same status endpoint.
+
 ## Commands
 
 ### `elevation`
@@ -45,7 +73,8 @@ Builds an elevation grid, applies a line-of-sight mask, and saves it as a PNG.
 - `--agl`: observer height above ground in meters, default `10`
 - `--radius`: physical grid radius, such as `40km`, `25mi`, `500m`, or `1000ft`; default `200km`
   (bare integers remain supported as legacy tile-radius values)
-- `--angleBins`: angular samples, default `1440`
+- `--angleBins`: requested azimuth samples, default `1440`; the engine may use
+  more rays for large grids to avoid gaps, and reports the effective count
 - `--out`: output path, default `./los.png`; format is selected by extension: `.png`, `.jpg`/`.jpeg`, `.webp`, or `.kmz`
 - `--elevation-out`: optionally save the stitched, unmasked elevation grid as a grayscale image
 - `--curvature-out`: optionally save the observer-relative curvature-adjusted grid as a grayscale image
@@ -79,8 +108,10 @@ summary reports ready and failed counts. A zoom range is processed from the
 lowest requested zoom to the highest; bounding boxes crossing the antimeridian
 are supported. Its bounded tile-coverage projection uses `#` for ready tiles,
 `x` for failed tiles, and `.` for tiles not yet processed. Copernicus COG
-downloads use up to four bounded workers, and overlapping tile requests share
-one in-flight download for the same COG.
+downloads use up to four bounded workers, and overlapping web tiles are
+deduplicated so each required one-degree COG is processed once, including
+across a requested zoom range. Some ocean and restricted GLO-30 cells are not
+published; those are reported as failed tiles and produce HTTP 404 responses.
 
 Elevation tiles use a bounded in-memory decoded cache and an atomic on-disk Smile cache. Terrarium source PNGs are stored under `terrarium/`, while Copernicus source data is retained as COGs under `cog/`. Copernicus prefetch ensures the required COGs are present without generating decoded tiles; normal elevation reads populate the geographic, provider-prefixed Smile files under `decoded/`. Source files and decoded values are safe to delete and will be rebuilt.
 
@@ -91,6 +122,12 @@ Terrain points are converted to Earth-centered, Earth-fixed coordinates and
 compared against the observer's local ellipsoidal up direction. The calculation
 supports ground-level, above-ground-level, and above-sea-level observer modes;
 there is no configurable spherical-radius approximation.
+
+LOS resolution has two parts: `--angleBins` controls the requested azimuth
+sweep, while the engine adapts the effective ray count to the grid extent. The
+terrain profile is sampled along each ray as it traverses the grid; it is not a
+separate vertical-angle binning pass. The progress bar reflects the effective
+ray count used for the grid.
 
 Elevation grids can also be composed and exported directly from Java using
 `ElevationService` and `TileCache`.

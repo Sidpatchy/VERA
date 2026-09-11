@@ -526,15 +526,19 @@ public class ElevationService {
                                                      ObserverHeightMode mode,
                                                      Double heightMeters,
                                                      TileCache cache) throws IOException {
-        // Default to 720 rays (~0.5° resolution)
+        // Default to 720 requested azimuth rays (~0.5° resolution before grid adaptation)
         return applyLineOfSightMask(grid, observerLatDeg, observerLonDeg, mode, heightMeters, cache, 720);
     }
 
     /**
      * Overload of applyLineOfSightMask that allows configuring the number of angular rays.
-     * Higher values increase angular resolution at the cost of performance.
+     * Higher values increase azimuthal resolution at the cost of performance.
+     * The engine may increase the actual ray count for large grids so adjacent
+     * rays do not leave gaps at the outer edge. Terrain is sampled along each
+     * ray's traversed cell segments; there is no independent vertical-angle
+     * sweep.
      *
-     * @param angleBins number of angular rays (e.g., 720 = 0.5°, 1440 = 0.25°)
+     * @param angleBins requested azimuth rays (e.g., 720 = 0.5°, 1440 = 0.25°)
      */
     public static ElevationGrid applyLineOfSightMask(ElevationGrid grid,
                                                      double observerLatDeg,

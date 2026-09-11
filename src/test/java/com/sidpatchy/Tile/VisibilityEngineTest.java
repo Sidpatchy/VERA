@@ -48,4 +48,15 @@ class VisibilityEngineTest {
         assertTrue(visible[12][12], "the observer cell must be visible");
         assertFalse(visible[12][20], "flat terrain falls below the spherical horizon");
     }
+
+    @Test
+    void effectiveRayCountCoversLargeGridCorners() {
+        float[][] values = new float[1_024][1_024];
+        ElevationService.ElevationGrid grid = new ElevationService.ElevationGrid(
+                values, 1_024, 1, 1, 12, 2048, 2048);
+
+        int effective = VisibilityEngine.effectiveRayCount(grid, OBSERVER_LAT, OBSERVER_LON, 1_440);
+
+        assertTrue(effective > 1_440);
+    }
 }

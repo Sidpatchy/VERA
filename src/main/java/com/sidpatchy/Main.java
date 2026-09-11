@@ -5,6 +5,7 @@ import com.sidpatchy.Tile.CurvatureModel;
 import com.sidpatchy.Tile.TileCache;
 import com.sidpatchy.Tile.ElevationProvider;
 import com.sidpatchy.Tile.ThunderforestTileCache;
+import com.sidpatchy.Tile.VisibilityEngine;
 
 import java.awt.image.BufferedImage;
 import java.io.File;
@@ -14,6 +15,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -72,13 +75,16 @@ public class Main {
                 "      [--angleBins <n>] [--overlay] [--tfKey <key>] [--out <file>]\n" +
                 "      [--elevation-out <file>] [--curvature-out <file>] [--source <terrarium|copernicus>]\n" +
                 "                                           Generate LOS image/KMZ (optionally overlay on TF)\n" +
+                "                                           --angleBins is requested azimuth resolution; large grids may use more rays\n" +
                 "                                           --radius accepts km, mi, m, or ft (for example 40km); default: 200km\n" +
                 "                                           Bare integer radii remain supported as legacy tile-radius values\n" +
                 "                                           Optionally export stitched elevation/curvature maps\n" +
                 "                                           Output formats: .png, .jpg/.jpeg, .webp, .kmz\n" +
                 "  prefetch --type <terrain|carto|thunder> --source <terrarium|copernicus> --minLat <v> --minLon <v> --maxLat <v> --maxLon <v>\n" +
                 "           [--zoom <z> | --zMin <z> --zMax <z>] [--cache <dir>] [--tfKey <key>]\n" +
-                "                                           Bulk download tiles into local cache\n");
+                "                                           Bulk download tiles into local cache\n" +
+                "  server [--port <n>] [--cache <dir>] [--output <dir>]\n" +
+                "                                           Start the asynchronous viewshed HTTP API\n");
     }
 
     private static Map<String, String> parseArgs(String[] args) {
@@ -108,6 +114,13 @@ public class Main {
         }
 
         String cmd = args[0].toLowerCase();
+        if (cmd.equals("server")) {
+            Map<String, String> p = parseArgs(args);
+            int port = Integer.parseInt(p.getOrDefault("port", "7070"));
+            new ApiServer(p.getOrDefault("output", "./api_output"),
+                    p.getOrDefault("cache", "./terrain_cache")).start(port);
+            return;
+        }
         CliProgress progress = CliProgress.open();
         switch (cmd) {
             case "elevation": {
@@ -178,10 +191,11 @@ public class Main {
                         System.out.println("Saved curvature map: " + new File(curvatureOut).getAbsolutePath());
                     }
                 }
-                progress.bar("Running LoS raycasts", 0, angleBins);
+                int effectiveAngleBins = VisibilityEngine.effectiveRayCount(grid, lat, lon, angleBins);
+                progress.bar("Running LoS raycasts", 0, effectiveAngleBins);
                 ElevationService.ElevationGrid losMasked = ElevationService.applyLineOfSightMask(
                         grid, lat, lon, ElevationService.ObserverHeightMode.AGL, agl, cache, angleBins,
-                        current -> progress.bar("Running LoS raycasts", current, angleBins));
+                        current -> progress.bar("Running LoS raycasts", current, effectiveAngleBins));
                 progress.complete("Running LoS raycasts");
 
                 if (overlay) {
@@ -285,10 +299,21 @@ public class Main {
                 while (maxLon > 180) { maxLon -= 360; }
 
                 List<PrefetchTile> tiles = planPrefetchTiles(minLat, minLon, maxLat, maxLon, zMin, zMax);
+                TileCache terrainCache = type.equals("terrain") ? new TileCache(cacheDir, provider) : null;
+                if (terrainCache != null && provider == ElevationProvider.COPERNICUS_GLO30) {
+                    Set<String> seenCoverage = new HashSet<>();
+                    tiles.removeIf(tile -> {
+                        String coverageKey = terrainCache.prefetchCoverageKey(tile.zoom(), tile.x(), tile.y());
+                        boolean hasNewCell = false;
+                        for (String cell : coverageKey.split(",")) {
+                            if (seenCoverage.add(cell)) hasNewCell = true;
+                        }
+                        return !hasNewCell;
+                    });
+                }
                 int total = tiles.size();
                 int success = 0;
                 int processed = 0;
-                TileCache terrainCache = type.equals("terrain") ? new TileCache(cacheDir, provider) : null;
                 com.sidpatchy.Tile.CartoTileCache cartoCache = type.equals("carto")
                         ? new com.sidpatchy.Tile.CartoTileCache(cacheDir, p.get("cartoKey")) : null;
                 ThunderforestTileCache thunderCache = type.equals("thunder")
@@ -333,8 +358,8 @@ public class Main {
                             success++;
                             succeeded = true;
                         } catch (Exception e) {
-                            System.err.println("Failed z=" + tile.zoom() + " x=" + tile.x() + " y=" + tile.y()
-                                    + ": " + e.getMessage());
+                            progress.message("Failed z=" + tile.zoom() + " x=" + tile.x() + " y=" + tile.y()
+                                    + ": " + (e.getMessage() == null ? e : e.getMessage()));
                         }
                         processed++;
                         int[] bounds = mapBounds.get(tile.zoom());

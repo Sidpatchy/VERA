@@ -51,3 +51,5 @@ thunder_cache/
 *.png
 
 .idea/
+
+__pycache__/

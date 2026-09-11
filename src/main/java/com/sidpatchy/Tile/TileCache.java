@@ -7,9 +7,9 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.smile.SmileFactory;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.dataformat.smile.SmileFactory;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.HashMap;
@@ -112,6 +112,11 @@ public class TileCache {
         }
 
         return tileFile;
+    }
+
+    public String prefetchCoverageKey(int zoom, int x, int y) {
+        if (provider != ElevationProvider.COPERNICUS_GLO30) return zoom + ":" + x + ":" + y;
+        return copernicus.prefetchCoverageKey(zoom, x, y);
     }
 
     /** Ensures the source data needed for a tile is present in the provider's native cache. */

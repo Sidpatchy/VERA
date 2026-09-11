@@ -12,6 +12,8 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
@@ -70,6 +72,27 @@ final class CopernicusGlo30TileCache {
                 ensureDownloaded(cogPath(cellSouth, cellWest), cogStem(cellSouth, cellWest));
             }
         }
+    }
+
+    /** Returns the one-degree COG cells touched by a web-mercator tile. */
+    String prefetchCoverageKey(int zoom, int x, int y) {
+        int n = 1 << zoom;
+        int wrappedX = Math.floorMod(x, n);
+        double west = (double) wrappedX / n * 360.0 - 180.0;
+        double east = (double) (wrappedX + 1) / n * 360.0 - 180.0;
+        double north = latitudeAtTileEdge(y, n);
+        double south = latitudeAtTileEdge(y + 1, n);
+        int westCell = Math.max(-180, Math.min(179, (int) Math.floor(west)));
+        int eastCell = Math.max(-180, Math.min(179, (int) Math.floor(Math.nextDown(east))));
+        int southCell = Math.max(-90, Math.min(89, (int) Math.floor(south)));
+        int northCell = Math.max(-90, Math.min(89, (int) Math.floor(north)));
+        Set<String> cells = new TreeSet<>();
+        for (int cellSouth = southCell; cellSouth <= northCell; cellSouth++) {
+            for (int cellWest = westCell; cellWest <= eastCell; cellWest++) {
+                cells.add(cellSouth + ":" + cellWest);
+            }
+        }
+        return String.join(",", cells);
     }
 
     private static double latitudeAtTileEdge(int y, int tileCount) {

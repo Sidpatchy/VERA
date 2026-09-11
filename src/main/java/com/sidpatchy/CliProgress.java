@@ -38,7 +38,12 @@ public final class CliProgress implements AutoCloseable {
         clearMap();
         out.print(progressLine(label, current, total));
         out.flush();
-        if (total > 0 && current >= total) out.println();
+        if (total > 0 && current >= total) {
+            out.println();
+            renderedMapLines = 0;
+        } else {
+            renderedMapLines = 1;
+        }
     }
 
     private String progressLine(String label, int current, int total) {
@@ -52,6 +57,16 @@ public final class CliProgress implements AutoCloseable {
     public void complete(String label) {
         clearMap();
         out.println("\r" + label + " complete");
+        out.flush();
+    }
+
+    /**
+     * Prints a durable message without leaving it inside the live progress frame.
+     * The next progress update will draw a new frame below this message.
+     */
+    public void message(String message) {
+        clearMap();
+        out.println(message);
         out.flush();
     }
 

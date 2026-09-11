@@ -1,5 +1,7 @@
 package com.sidpatchy;
 
+import com.sidpatchy.Tile.ElevationProvider;
+import com.sidpatchy.Tile.TileCache;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -24,5 +26,12 @@ class MainTest {
         assertThrows(IllegalArgumentException.class, () -> Main.parseRadiusTiles("-5km", 0.0, 12));
         assertThrows(IllegalArgumentException.class, () -> Main.parseRadiusTiles("tenkm", 0.0, 12));
         assertThrows(IllegalArgumentException.class, () -> Main.parseRadiusTiles("5yards", 0.0, 12));
+    }
+
+    @Test
+    void copernicusCoverageKeyIsIndependentOfWebTileZoom() {
+        TileCache cache = new TileCache("build/test-copernicus-cache", ElevationProvider.COPERNICUS_GLO30);
+        assertEquals(cache.prefetchCoverageKey(12, 1000, 1500),
+                cache.prefetchCoverageKey(13, 2000, 3000));
     }
 }
