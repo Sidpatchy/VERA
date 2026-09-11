@@ -22,9 +22,15 @@ public final class KmzExporter {
 
     public static void writeViewshed(Path output, BufferedImage image,
                                      ElevationService.ElevationGrid grid) throws IOException {
+        writeViewshed(output, image, grid, null);
+    }
+
+    public static void writeViewshed(Path output, BufferedImage image,
+                                     ElevationService.ElevationGrid grid,
+                                     String name) throws IOException {
         Path parent = output.toAbsolutePath().getParent();
         if (parent != null) Files.createDirectories(parent);
-        String title = buildTitle(output);
+        String title = buildTitle(output, name);
 
         try (OutputStream file = Files.newOutputStream(output);
              ZipOutputStream zip = new ZipOutputStream(file, StandardCharsets.UTF_8)) {
@@ -56,7 +62,8 @@ public final class KmzExporter {
         return "viewshed/r" + row + "c" + column + ".png";
     }
 
-    private static String buildTitle(Path output) {
+    private static String buildTitle(Path output, String name) {
+        if (name != null && !name.isBlank()) return escapeXml(name);
         String fileName = output.getFileName().toString();
         int extension = fileName.lastIndexOf('.');
         String baseName = extension > 0 ? fileName.substring(0, extension) : fileName;

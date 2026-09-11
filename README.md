@@ -43,11 +43,12 @@ Submit a viewshed job with `POST /api/viewsheds`:
   "radiusMeters": 40000,
   "zoom": 12,
   "angleBins": 1440,
-  "format": "png"
+  "format": "png",
+  "name": "optional-kmz-name"
 }
 ```
 
-The response is `202 Accepted` and contains `statusUrl` and `resultUrl`. Poll
+The optional `name` is used for the KMZ title and download filename. The response is `202 Accepted` and contains `statusUrl` and `resultUrl`. Poll
 the status URL to receive `status`, `phase`, `current`, `total`, and `percent`
 while the job runs. When `status` is `completed`, download `resultUrl` to get
 the PNG (or use `"format": "kmz"` for a georeferenced KMZ). Failed jobs report
@@ -76,6 +77,7 @@ Builds an elevation grid, applies a line-of-sight mask, and saves it as a PNG.
 - `--angleBins`: requested azimuth samples, default `1440`; the engine may use
   more rays for large grids to avoid gaps, and reports the effective count
 - `--out`: output path, default `./los.png`; format is selected by extension: `.png`, `.jpg`/`.jpeg`, `.webp`, or `.kmz`
+- `--name`: optional KMZ name; it is used for the KMZ title
 - `--elevation-out`: optionally save the stitched, unmasked elevation grid as a grayscale image
 - `--curvature-out`: optionally save the observer-relative curvature-adjusted grid as a grayscale image
 - `--overlay`: render the result over a Carto or Thunderforest basemap

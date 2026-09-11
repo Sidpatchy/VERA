@@ -76,6 +76,7 @@ public class Main {
                 "                                           Print elevation (meters) at lat/lon\n" +
                 "  los --lat <v> --lon <v> [--zoom <z>] [--agl <m>] [--radius <distance>]\n" +
                 "      [--angleBins <n>] [--overlay] [--tfKey <key>] [--out <file>]\n" +
+                "      [--name <name>]\n" +
                 "      [--elevation-out <file>] [--curvature-out <file>] [--source <terrarium|copernicus>]\n" +
                 "                                           Generate LOS image/KMZ (optionally overlay on TF)\n" +
                 "                                           --angleBins is requested azimuth resolution; large grids may use more rays\n" +
@@ -151,6 +152,7 @@ public class Main {
                 int angleBins = Integer.parseInt(p.getOrDefault("angleBins", "1440"));
                 boolean overlay = Boolean.parseBoolean(p.getOrDefault("overlay", "false"));
                 String out = p.getOrDefault("out", overlay ? "./los_overlay.png" : "./los.png");
+                String name = p.get("name");
                 boolean kmz = out.toLowerCase().endsWith(".kmz");
 
                 if (kmz && overlay) {
@@ -250,7 +252,7 @@ public class Main {
                     progress.complete("Rendering elevation image");
                     try (CliProgress.Spinner ignored = progress.spinner("Encoding image")) {
                         if (kmz) {
-                            KmzExporter.writeViewshed(Path.of(out), image, losMasked);
+                            KmzExporter.writeViewshed(Path.of(out), image, losMasked, name);
                         } else {
                             ElevationService.writeImageFile(image, new File(out));
                         }

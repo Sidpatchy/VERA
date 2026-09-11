@@ -78,6 +78,10 @@ public final class ApiServer implements AutoCloseable {
         }
         context.contentType(job.output.toString().endsWith(".kmz")
                 ? "application/vnd.google-earth.kmz" : "image/png");
+        if (job.parameters.kmz && job.parameters.name != null) {
+            context.header("Content-Disposition", "attachment; filename=\""
+                    + safeDownloadName(job.parameters.name) + "\"");
+        }
         // Javalin writes an InputStream after the handler returns, so closing it
         // here causes the deferred response copy to fail with ClosedChannelException.
         context.result(Files.readAllBytes(job.output));
@@ -112,7 +116,7 @@ public final class ApiServer implements AutoCloseable {
             BufferedImage image = ElevationService.elevationGridToImage(masked, job.progress::update);
             job.progress.start("Writing image", 1);
             if (job.parameters.kmz) {
-                KmzExporter.writeViewshed(output, image, masked);
+                KmzExporter.writeViewshed(output, image, masked, job.parameters.name);
             } else {
                 ElevationService.writeImageFile(image, output.toFile());
             }
@@ -123,6 +127,12 @@ public final class ApiServer implements AutoCloseable {
             job.error = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             job.state = State.FAILED;
         }
+    }
+
+    private static String safeDownloadName(String name) {
+        String safe = name.replaceAll("[^A-Za-z0-9._-]", "_");
+        if (safe.isBlank()) return "viewshed.kmz";
+        return safe.toLowerCase().endsWith(".kmz") ? safe : safe + ".kmz";
     }
 
     @Override
@@ -177,13 +187,14 @@ public final class ApiServer implements AutoCloseable {
         final double lat, lon, agl, radiusMeters;
         final int zoom, angleBins;
         final String source, cacheDirectory;
+        final String name;
         final boolean kmz;
 
         private ViewshedRequest(double lat, double lon, double agl, double radiusMeters, int zoom,
-                                int angleBins, String source, String cacheDirectory, boolean kmz) {
+                                int angleBins, String source, String cacheDirectory, String name, boolean kmz) {
             this.lat = lat; this.lon = lon; this.agl = agl; this.radiusMeters = radiusMeters;
             this.zoom = zoom; this.angleBins = angleBins; this.source = source;
-            this.cacheDirectory = cacheDirectory; this.kmz = kmz;
+            this.cacheDirectory = cacheDirectory; this.name = name; this.kmz = kmz;
         }
 
         static ViewshedRequest from(JsonNode n) {
@@ -200,7 +211,8 @@ public final class ApiServer implements AutoCloseable {
             String format = n.path("format").asText("png").toLowerCase();
             if (!format.equals("png") && !format.equals("kmz")) throw new IllegalArgumentException("format must be png or kmz");
             return new ViewshedRequest(lat, lon, agl, radius, zoom, angleBins,
-                    n.path("source").asText("terrarium"), textOrNull(n, "cache"), format.equals("kmz"));
+                    n.path("source").asText("terrarium"), textOrNull(n, "cache"),
+                    textOrNull(n, "name"), format.equals("kmz"));
         }
 
         private static double requiredDouble(JsonNode n, String name) {

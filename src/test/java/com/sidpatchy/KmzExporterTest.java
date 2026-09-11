@@ -62,4 +62,21 @@ class KmzExporterTest {
             Files.deleteIfExists(output);
         }
     }
+
+    @Test
+    void usesCustomNameInKml() throws Exception {
+        BufferedImage source = new BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB);
+        ElevationService.ElevationGrid grid = new ElevationService.ElevationGrid(
+                new float[1][1], 1, 1, 1, 2, 2, 2);
+        Path output = Files.createTempFile("viewshed", ".kmz");
+        try {
+            KmzExporter.writeViewshed(output, source, grid, "My & Viewshed");
+            try (ZipFile zip = new ZipFile(output.toFile())) {
+                String kml = new String(zip.getInputStream(zip.getEntry("doc.kml")).readAllBytes());
+                org.junit.jupiter.api.Assertions.assertTrue(kml.contains("My &amp; Viewshed"));
+            }
+        } finally {
+            Files.deleteIfExists(output);
+        }
+    }
 }
