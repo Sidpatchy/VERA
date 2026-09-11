@@ -8,7 +8,7 @@ import java.util.stream.IntStream;
 /**
  * Visibility engine for elevation grids.
  * Computes a boolean visibility mask from a given observer using sub-cell terrain
- * interpolation and spherical observer-to-terrain geometry.
+ * interpolation and precomputed WGS84 observer-to-terrain geometry.
  */
 public final class VisibilityEngine {
     private static final double[] SEGMENT_SAMPLE_FRACTIONS = {0.01, 0.25, 0.5, 0.75, 0.99};
@@ -21,7 +21,7 @@ public final class VisibilityEngine {
      * Compute LOS mask using equally spaced angle bins and a grid DDA traversal.
      * Each traversed cell is sampled at multiple points along the ray segment,
      * rather than only at the cell centre. Elevation is bilinearly interpolated
-     * at those points and the sight angle is calculated on a spherical Earth.
+     * at those points and the sight angle is calculated using WGS84 geometry.
      * Returns a 2D boolean array with true where visible.
      */
     public static boolean[][] computeVisibilityMask(
@@ -106,6 +106,11 @@ public final class VisibilityEngine {
         final double originTileY;
         final double inverseWorldSize;
         final double inverseTileSize;
+        final double[] longitudeSin;
+        final double[] longitudeCos;
+        final double[] latitudeSin;
+        final double[] latitudeCos;
+        final double[] ellipsoidRadius;
 
         RaycastContext(ElevationService.ElevationGrid grid, double observerLatDeg,
                        double observerLonDeg, double eyeLevel) {
@@ -130,6 +135,30 @@ public final class VisibilityEngine {
             originTileY = grid.centerTileY - radiusTiles;
             inverseWorldSize = 1.0 / Math.pow(2.0, grid.zoom);
             inverseTileSize = 1.0 / grid.tileSize;
+
+            // Geographic geometry is constant for a grid. Precompute it once
+            // in compact row/column arrays instead of recalculating trig and
+            // WGS84 radius values for every ray sample.
+            longitudeSin = new double[grid.width];
+            longitudeCos = new double[grid.width];
+            for (int x = 0; x < grid.width; x++) {
+                double longitude = (originTileX + (x + 0.5) * inverseTileSize)
+                        * inverseWorldSize * 2.0 * Math.PI - Math.PI;
+                longitudeSin[x] = Math.sin(longitude);
+                longitudeCos[x] = Math.cos(longitude);
+            }
+            latitudeSin = new double[grid.height];
+            latitudeCos = new double[grid.height];
+            ellipsoidRadius = new double[grid.height];
+            for (int y = 0; y < grid.height; y++) {
+                double mercator = Math.PI * (1.0 - 2.0
+                        * (originTileY + (y + 0.5) * inverseTileSize) * inverseWorldSize);
+                double latitude = Math.atan(Math.sinh(mercator));
+                latitudeSin[y] = Math.sin(latitude);
+                latitudeCos[y] = Math.cos(latitude);
+                ellipsoidRadius[y] = WGS84_SEMI_MAJOR / Math.sqrt(
+                        1.0 - WGS84_ECCENTRICITY_SQUARED * latitudeSin[y] * latitudeSin[y]);
+            }
         }
     }
 
@@ -215,32 +244,22 @@ public final class VisibilityEngine {
 
     private static double sightAngle(RaycastContext context, double sampleX, double sampleY,
                                      double terrainElevation) {
-        double globalX = context.originTileX + (sampleX + 0.5) * context.inverseTileSize;
-        double globalY = context.originTileY + (sampleY + 0.5) * context.inverseTileSize;
-        double targetLonDeg = normalizeLongitude(
-                globalX * context.inverseWorldSize * 360.0 - 180.0);
-        double mercator = Math.PI * (1.0 - 2.0 * globalY * context.inverseWorldSize);
-        double targetLatDeg = Math.toDegrees(Math.atan(Math.sinh(mercator)));
+        int x0 = (int) Math.floor(sampleX);
+        int y0 = (int) Math.floor(sampleY);
+        int x1 = Math.min(x0 + 1, context.longitudeSin.length - 1);
+        int y1 = Math.min(y0 + 1, context.latitudeSin.length - 1);
+        double tx = sampleX - x0;
+        double ty = sampleY - y0;
 
-        double lat2 = Math.toRadians(targetLatDeg);
-        double deltaLat = lat2 - context.observerLatRad;
-        double deltaLon = Math.toRadians(shortestLongitudeDelta(targetLonDeg - context.observerLonDeg));
-        double haversine = Math.sin(deltaLat * 0.5) * Math.sin(deltaLat * 0.5)
-                + context.observerCosLat * Math.cos(lat2)
-                * Math.sin(deltaLon * 0.5) * Math.sin(deltaLon * 0.5);
-        // The central angle is only used to reject the observer point. Avoid
-        // atan2 here; the exact angle is not needed for the sight-angle test.
-        if (haversine < 2.5e-25) return -Double.MAX_VALUE;
-
-        double targetSinLat = Math.sin(lat2);
-        double targetCosLat = Math.cos(lat2);
-        double targetLonRad = Math.toRadians(targetLonDeg);
-        double targetRadius = WGS84_SEMI_MAJOR / Math.sqrt(
-                1.0 - WGS84_ECCENTRICITY_SQUARED * targetSinLat * targetSinLat);
-        double targetX = (targetRadius + terrainElevation) * targetCosLat * Math.cos(targetLonRad);
-        double targetY = (targetRadius + terrainElevation) * targetCosLat * Math.sin(targetLonRad);
+        double sinLon = interpolate(context.longitudeSin[x0], context.longitudeSin[x1], tx);
+        double cosLon = interpolate(context.longitudeCos[x0], context.longitudeCos[x1], tx);
+        double sinLat = interpolate(context.latitudeSin[y0], context.latitudeSin[y1], ty);
+        double cosLat = interpolate(context.latitudeCos[y0], context.latitudeCos[y1], ty);
+        double targetRadius = interpolate(context.ellipsoidRadius[y0], context.ellipsoidRadius[y1], ty);
+        double targetX = (targetRadius + terrainElevation) * cosLat * cosLon;
+        double targetY = (targetRadius + terrainElevation) * cosLat * sinLon;
         double targetZ = (targetRadius * (1.0 - WGS84_ECCENTRICITY_SQUARED)
-                + terrainElevation) * targetSinLat;
+                + terrainElevation) * sinLat;
         double dx = targetX - context.observerX;
         double dy = targetY - context.observerY;
         double dz = targetZ - context.observerZ;
@@ -254,13 +273,11 @@ public final class VisibilityEngine {
         return vertical / Math.sqrt(horizontalSquared);
     }
 
-
-    private static double shortestLongitudeDelta(double delta) {
-        double result = delta % 360.0;
-        if (result < -180.0) result += 360.0;
-        if (result >= 180.0) result -= 360.0;
-        return result;
+    private static double interpolate(double a, double b, double fraction) {
+        return a + (b - a) * fraction;
     }
+
+
 
     private static boolean isInsideGrid(ElevationService.ElevationGrid grid, double px, double py) {
         return px >= 0.0 && py >= 0.0 && px < grid.width && py < grid.height;
