@@ -85,8 +85,8 @@ public class Main {
                 "                                           Optionally export stitched elevation/curvature maps\n" +
                 "                                           Output formats: .png, .jpg/.jpeg, .webp, .kmz\n" +
                 "  prefetch --type <terrain|carto|thunder> --source <terrarium|copernicus> --minLat <v> --minLon <v> --maxLat <v> --maxLon <v>\n" +
-                "           [--zoom <z> | --zMin <z> --zMax <z>] [--cache <dir>] [--tfKey <key>] [--threads <n>]\n" +
-                "                                           Bulk download tiles into local cache\n" +
+                "           [--zoom <z> | --zMin <z> --zMax <z>] [--cache <dir>] [--tfKey <key>] [--threads <n>] [--compile]\n" +
+                "                                           Bulk download tiles into local cache; --compile also builds decoded terrain data\n" +
                 "  server [--port <n>] [--cache <dir>] [--output <dir>]\n" +
                 "                                           Start the asynchronous viewshed HTTP API\n");
     }
@@ -99,7 +99,7 @@ public class Main {
             if (a.startsWith("--")) {
                 key = a.substring(2);
                 // flags (no value)
-                if (key.equals("overlay")) {
+                if (key.equals("overlay") || key.equals("compile")) {
                     map.put(key, "true");
                     key = null;
                 }
@@ -266,6 +266,7 @@ public class Main {
                 Map<String, String> p = parseArgs(args);
                 String type = p.getOrDefault("type", "terrain").toLowerCase();
                 ElevationProvider provider = ElevationProvider.parse(p.get("source"));
+                boolean compile = Boolean.parseBoolean(p.getOrDefault("compile", "false"));
                 double minLat = Double.parseDouble(p.get("minLat"));
                 double minLon = Double.parseDouble(p.get("minLon"));
                 double maxLat = Double.parseDouble(p.get("maxLat"));
@@ -280,6 +281,11 @@ public class Main {
                 String tfKey = p.get("tfKey");
                 if (!type.equals("terrain") && !type.equals("carto") && !type.equals("thunder")) {
                     System.err.println("Unknown prefetch type: " + type + " (expected terrain, carto, or thunder)");
+                    progress.close();
+                    return;
+                }
+                if (compile && !type.equals("terrain")) {
+                    System.err.println("--compile requires --type terrain");
                     progress.close();
                     return;
                 }
@@ -382,6 +388,9 @@ public class Main {
                                 thunderCache.getTile(tile.zoom(), tile.x(), tile.y());
                             } else {
                                 throw new IllegalStateException("No tile cache configured for " + type);
+                            }
+                            if (compile) {
+                                terrainCache.getElevationData(tile.zoom(), tile.x(), tile.y());
                             }
                             success++;
                             succeeded = true;

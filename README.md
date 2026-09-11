@@ -104,6 +104,7 @@ Downloads tiles into a local cache for later CLI operations.
 - `--cache`: destination cache directory
 - `--tfKey`: required for `thunder` tiles
 - `--threads`: concurrent Copernicus prefetch workers, default `8`
+- `--compile`: for `terrain`, also decode each prefetched tile into the geographic Smile cache
 
 Prefetch displays a stable overall progress bar while it processes the planned
 tile set. The bar advances for both successful and failed tiles, and the final
