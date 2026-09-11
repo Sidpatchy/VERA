@@ -3,6 +3,7 @@ package com.sidpatchy;
 import com.sidpatchy.Tile.ElevationService;
 import com.sidpatchy.Tile.CurvatureModel;
 import com.sidpatchy.Tile.TileCache;
+import com.sidpatchy.Tile.ElevationProvider;
 import com.sidpatchy.Tile.ThunderforestTileCache;
 
 import java.awt.image.BufferedImage;
@@ -16,15 +17,15 @@ public class Main {
     private static void printUsage() {
         System.out.println("VERA CLI\n" +
                 "Commands:\n" +
-                "  elevation --lat <v> --lon <v> [--zoom <z>] [--cache <dir>]\n" +
+                "  elevation --lat <v> --lon <v> [--zoom <z>] [--source <terrarium|copernicus>] [--cache <dir>]\n" +
                 "                                           Print elevation (meters) at lat/lon\n" +
                 "  los --lat <v> --lon <v> [--zoom <z>] [--agl <m>] [--radius <tiles>]\n" +
                 "      [--angleBins <n>] [--overlay] [--tfKey <key>] [--out <file>]\n" +
-                "      [--elevation-out <file>] [--curvature-out <file>]\n" +
+                "      [--elevation-out <file>] [--curvature-out <file>] [--source <terrarium|copernicus>]\n" +
                 "                                           Generate LOS image/KMZ (optionally overlay on TF)\n" +
                 "                                           Optionally export stitched elevation/curvature maps\n" +
                 "                                           Output formats: .png, .jpg/.jpeg, .webp, .kmz\n" +
-                "  prefetch --type <terrain|carto|thunder> --minLat <v> --minLon <v> --maxLat <v> --maxLon <v>\n" +
+                "  prefetch --type <terrain|carto|thunder> --source <terrarium|copernicus> --minLat <v> --minLon <v> --maxLat <v> --maxLon <v>\n" +
                 "           [--zoom <z> | --zMin <z> --zMax <z>] [--cache <dir>] [--tfKey <key>]\n" +
                 "                                           Bulk download tiles into local cache\n");
     }
@@ -64,7 +65,8 @@ public class Main {
                 double lon = Double.parseDouble(p.getOrDefault("lon", Double.toString(-113.6556245641089)));
                 int zoom = Integer.parseInt(p.getOrDefault("zoom", "12"));
                 String cacheDir = p.getOrDefault("cache", "./terrain_cache");
-                 TileCache cache = new TileCache(cacheDir);
+                 TileCache cache = new TileCache(cacheDir, ElevationProvider.parse(p.get("source")));
+                 System.out.println("Elevation source: " + ElevationProvider.parse(p.get("source")));
                  double elevation = ElevationService.getElevationAt(lat, lon, zoom, cache);
                  progress.complete("Elevation lookup");
                  System.out.println("Elevation(m): " + elevation);
@@ -89,7 +91,9 @@ public class Main {
                     return;
                 }
 
-                TileCache cache = new TileCache(p.getOrDefault("cache", "./terrain_cache"));
+                TileCache cache = new TileCache(p.getOrDefault("cache", "./terrain_cache"),
+                        ElevationProvider.parse(p.get("source")));
+                System.out.println("Elevation source: " + ElevationProvider.parse(p.get("source")));
                 ElevationService.ElevationGrid grid;
                 int elevationTiles = (radius * 2 + 1) * (radius * 2 + 1);
                 progress.bar("Loading elevation tiles", 0, elevationTiles);
@@ -190,6 +194,7 @@ public class Main {
             case "prefetch": {
                 Map<String, String> p = parseArgs(args);
                 String type = p.getOrDefault("type", "terrain").toLowerCase();
+                ElevationProvider provider = ElevationProvider.parse(p.get("source"));
                 double minLat = Double.parseDouble(p.get("minLat"));
                 double minLon = Double.parseDouble(p.get("minLon"));
                 double maxLat = Double.parseDouble(p.get("maxLat"));
@@ -262,7 +267,7 @@ public class Main {
                                         total++;
                                         try {
                                             if (type.equals("terrain")) {
-                                                new TileCache(cacheDir).getTile(z, x, y);
+                                                new TileCache(cacheDir, provider).getTile(z, x, y);
                                             } else if (type.equals("carto")) {
                                                 new com.sidpatchy.Tile.CartoTileCache(cacheDir, p.get("cartoKey")).getTile(z, x, y);
                                             } else {
@@ -283,7 +288,7 @@ public class Main {
                                     total++;
                                     try {
                                         if (type.equals("terrain")) {
-                                            new TileCache(cacheDir).getTile(z, x, y);
+                                            new TileCache(cacheDir, provider).getTile(z, x, y);
                                         } else if (type.equals("carto")) {
                                             new com.sidpatchy.Tile.CartoTileCache(cacheDir, p.get("cartoKey")).getTile(z, x, y);
                                         } else {

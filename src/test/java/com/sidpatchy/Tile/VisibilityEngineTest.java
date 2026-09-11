@@ -6,8 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class VisibilityEngineTest {
-    private static final double OBSERVER_LAT = -0.0439453125;
-    private static final double OBSERVER_LON = 0.0439453125;
+    // Geographic center of sample pixel [12][12] in the synthetic 3x3-tile grid.
+    private static final double OBSERVER_LAT = -0.0494384765625;
+    private static final double OBSERVER_LON = 0.0494384765625;
 
     @Test
     void sphericalRaycastBlocksTerrainBehindAnElevatedRidge() throws Exception {

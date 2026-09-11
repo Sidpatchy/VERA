@@ -57,12 +57,9 @@ public class ElevationService {
         int xTile = (int) Math.floor(xTileF);
         int yTile = (int) Math.floor(yTileF);
 
-        File tileFile = cache.getTile(zoom, xTile, yTile);
-        BufferedImage img = ImageIO.read(tileFile);
-        if (img == null) throw new IOException("Failed to read tile image: " + tileFile);
-
-        int tileW = img.getWidth();
-        int tileH = img.getHeight();
+        float[][] tile = cache.getElevationData(zoom, xTile, yTile);
+        int tileH = tile.length;
+        int tileW = tileH == 0 ? 0 : tile[0].length;
 
         int pixelX = (int) Math.floor((xTileF - xTile) * tileW);
         int pixelY = (int) Math.floor((yTileF - yTile) * tileH);
@@ -70,7 +67,7 @@ public class ElevationService {
         pixelX = clamp(pixelX, 0, tileW - 1);
         pixelY = clamp(pixelY, 0, tileH - 1);
 
-        return ElevationDecoder.getElevation(img, pixelX, pixelY);
+        return tile[pixelY][pixelX];
     }
 
     /**
@@ -110,18 +107,16 @@ public class ElevationService {
         // Load each tile once and compute its point elevations
         for (Map.Entry<TileKey, List<IndexedPoint>> entry : groups.entrySet()) {
             TileKey key = entry.getKey();
-            File tileFile = cache.getTile(key.zoom, key.x, key.y);
-            BufferedImage img = ImageIO.read(tileFile);
-            if (img == null) throw new IOException("Failed to read tile image: " + tileFile);
-            int tileW = img.getWidth();
-            int tileH = img.getHeight();
+            float[][] tile = cache.getElevationData(key.zoom, key.x, key.y);
+            int tileH = tile.length;
+            int tileW = tileH == 0 ? 0 : tile[0].length;
 
             for (IndexedPoint ip : entry.getValue()) {
                 double localXF = ip.xTileF - Math.floor(ip.xTileF);
                 double localYF = ip.yTileF - Math.floor(ip.yTileF);
                 int px = clamp((int) Math.floor(localXF * tileW), 0, tileW - 1);
                 int py = clamp((int) Math.floor(localYF * tileH), 0, tileH - 1);
-                double elev = ElevationDecoder.getElevation(img, px, py);
+                double elev = tile[py][px];
                 results.set(ip.index, elev);
             }
         }
@@ -222,6 +217,7 @@ public class ElevationService {
                                                        TileCache cache, IntConsumer tileProgress) throws IOException {
         if (cache == null) throw new IllegalArgumentException("TileCache must not be null");
         if (radiusTiles < 0) throw new IllegalArgumentException("radiusTiles must be >= 0");
+        cache.beginBatch();
 
         // Clamp and normalize inputs
         double lat = clamp(latDeg, -MAX_MERCATOR_LAT, MAX_MERCATOR_LAT);
@@ -236,11 +232,9 @@ public class ElevationService {
         int centerY = (int)Math.floor(clamp(yTileF, 0.0, Math.nextDown(n)));
 
         // Read a sample tile to determine tile dimensions
-        File centerFile = cache.getTile(zoom, centerX, centerY);
-        BufferedImage sample = ImageIO.read(centerFile);
-        if (sample == null) throw new IOException("Failed to read tile image: " + centerFile);
-        final int tileW = sample.getWidth();
-        final int tileH = sample.getHeight();
+        float[][] centerTile = cache.getElevationData(zoom, centerX, centerY);
+        final int tileH = centerTile.length;
+        final int tileW = tileH == 0 ? 0 : centerTile[0].length;
         if (tileW != tileH) {
             // Still supported, but track by height for rows and width for columns
         }
@@ -280,11 +274,9 @@ public class ElevationService {
                     continue; // outside Web Mercator vertical bounds
                 }
 
-                File tf = cache.getTile(zoom, tx, ty);
-                BufferedImage img = ImageIO.read(tf);
-                if (img == null) throw new IOException("Failed to read tile image: " + tf);
-                int w = img.getWidth();
-                int h = img.getHeight();
+                float[][] tile = cache.getElevationData(zoom, tx, ty);
+                int h = tile.length;
+                int w = h == 0 ? 0 : tile[0].length;
 
                 int destX0 = (dx + radiusTiles) * tileW;
                 int destY0 = (dy + radiusTiles) * tileH;
@@ -296,14 +288,14 @@ public class ElevationService {
                     for (int px = 0; px < w; px++) {
                         int col = destX0 + px;
                         if (col < 0 || col >= totalW) continue;
-                        double elev = ElevationDecoder.getElevation(img, px, py);
-                        data[row][col] = (float) elev;
+                        data[row][col] = tile[py][px];
                     }
                 }
                 tileProgress.accept(tileNumber);
             }
         }
 
+        cache.endBatch();
         return new ElevationGrid(data, tileW, tilesSpan, tilesSpan, zoom, centerX, centerY);
     }
 

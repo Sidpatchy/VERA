@@ -24,6 +24,8 @@ repositories {
 dependencies {
     implementation("org.jline:jline:4.4.3")
     implementation("com.twelvemonkeys.imageio:imageio-webp:3.12.0")
+    implementation("com.twelvemonkeys.imageio:imageio-tiff:3.12.0")
+    implementation("com.fasterxml.jackson.dataformat:jackson-dataformat-smile:2.20.0")
 
     testImplementation(platform("org.junit:junit-bom:5.10.0"))
     testImplementation("org.junit.jupiter:junit-jupiter")
@@ -45,6 +47,7 @@ tasks.shadowJar {
         attributes["Main-Class"] = "com.sidpatchy.Main"
         attributes["Enable-Native-Access"] = "ALL-UNNAMED"
     }
+    mergeServiceFiles()
 }
 
 tasks.test {

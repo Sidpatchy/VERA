@@ -236,8 +236,8 @@ public final class CurvatureModel {
     private static double[] gridPixelToLatLon(ElevationService.ElevationGrid grid, double px, double py) {
         int radiusTiles = (grid.tilesWide - 1) / 2;
         double n = Math.pow(2.0, grid.zoom);
-        double globalX = grid.centerTileX - radiusTiles + px / grid.tileSize;
-        double globalY = grid.centerTileY - radiusTiles + py / grid.tileSize;
+        double globalX = grid.centerTileX - radiusTiles + (px + 0.5) / grid.tileSize;
+        double globalY = grid.centerTileY - radiusTiles + (py + 0.5) / grid.tileSize;
         double lon = normalizeLongitude(globalX / n * 360.0 - 180.0);
         double mercator = Math.PI * (1.0 - 2.0 * globalY / n);
         double lat = Math.toDegrees(Math.atan(Math.sinh(mercator)));
@@ -340,8 +340,8 @@ public final class CurvatureModel {
         int dxTilesInt = xTile - grid.centerTileX;
         dxTilesInt = (int) Math.round(((dxTilesInt + n / 2.0) % n) - n / 2.0);
         int dyTilesInt = yTile - grid.centerTileY;
-        double px = (dxTilesInt + radiusTiles) * (double) grid.tileSize + fracX * grid.tileSize;
-        double py = (dyTilesInt + radiusTiles) * (double) grid.tileSize + fracY * grid.tileSize;
+        double px = (dxTilesInt + radiusTiles) * (double) grid.tileSize + fracX * grid.tileSize - 0.5;
+        double py = (dyTilesInt + radiusTiles) * (double) grid.tileSize + fracY * grid.tileSize - 0.5;
         return new double[]{px, py};
     }
     private static double[] latLonToTileFractional(double latDeg, double lonDeg, int zoom) {

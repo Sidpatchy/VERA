@@ -1,6 +1,6 @@
 # VERA
 
-VERA is a command-line utility for retrieving and composing terrain elevations from Mapzen Terrarium tiles, exporting stitched grids to PNG, JPEG, WebP, or georeferenced KMZ, and applying Earth-curvature and line-of-sight analysis.
+VERA is a command-line utility for retrieving and composing terrain elevations from Mapzen Terrarium tiles or Copernicus GLO-30, exporting stitched grids to PNG, JPEG, WebP, or georeferenced KMZ, and applying Earth-curvature and line-of-sight analysis.
 
 ## Quick start
 
@@ -34,6 +34,7 @@ Prints elevation in meters at a latitude and longitude.
 - `--lat`, `--lon`: coordinate values (defaults are provided when omitted)
 - `--zoom`: tile zoom, default `12`
 - `--cache`: terrain cache directory, default `./terrain_cache`
+- `--source`: `terrarium` (default) or `copernicus` for public Copernicus GLO-30 data
 
 ### `los`
 
@@ -50,6 +51,7 @@ Builds an elevation grid, applies a line-of-sight mask, and saves it as a PNG.
 - `--overlay`: render the result over a Carto or Thunderforest basemap
 - `--tfKey`: Thunderforest key; `--cartoKey` can be used as the fallback provider
 - `--cache`, `--tfCache`, `--cartoCache`: cache directories for the providers
+- `--source`: `terrarium` (default) or `copernicus` for public Copernicus GLO-30 data
 
 PNG preserves transparency, while JPEG is written with a white background. WebP is
 available through the bundled ImageIO plugin. JPEG XL (`.jxl`) is not currently
@@ -69,6 +71,8 @@ Downloads tiles into a local cache for later CLI operations.
 - `--zoom`, or `--zMin` and `--zMax`: requested zoom level or range
 - `--cache`: destination cache directory
 - `--tfKey`: required for `thunder` tiles
+
+Elevation tiles use a bounded in-memory decoded cache and an atomic on-disk Smile cache. Terrarium source PNGs are stored under `terrarium/`, while Copernicus source data is retained as COGs under `cog/`. Both providers decode into the same geographic, provider-prefixed Smile files under `decoded/`; source files and decoded values are safe to delete and will be rebuilt.
 
 ## Library behavior
 

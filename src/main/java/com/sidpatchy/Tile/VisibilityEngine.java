@@ -1,7 +1,9 @@
 package com.sidpatchy.Tile;
 
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntConsumer;
+import java.util.stream.IntStream;
 
 /**
  * Visibility engine for elevation grids.
@@ -9,7 +11,9 @@ import java.util.function.IntConsumer;
  * interpolation and spherical observer-to-terrain geometry.
  */
 public final class VisibilityEngine {
-    private static final double[] SEGMENT_SAMPLE_FRACTIONS = {0.05, 0.5, 0.95};
+    private static final double[] SEGMENT_SAMPLE_FRACTIONS = {0.01, 0.25, 0.5, 0.75, 0.99};
+    private static final double WGS84_SEMI_MAJOR = 6_378_137.0;
+    private static final double WGS84_ECCENTRICITY_SQUARED = 6.6943799901413165e-3;
 
     private VisibilityEngine() {}
 
@@ -65,25 +69,74 @@ public final class VisibilityEngine {
         if (mode == ElevationService.ObserverHeightMode.AGL && heightMeters != null) eyeAGL = Math.max(0.0, heightMeters);
         else if (mode == ElevationService.ObserverHeightMode.ASL && heightMeters != null) eyeAGL = Math.max(0.0, heightMeters - groundAtObserver);
         final double eyeLevel = groundAtObserver + eyeAGL;
+        RaycastContext context = new RaycastContext(grid, observerLatDeg, observerLonDeg, eyeLevel);
         // Angular sweep using grid DDA ray marching
         final double twoPi = Math.PI * 2.0;
-        for (int ai = 0; ai < angleBins; ai++) {
-            double theta = (ai / (double) angleBins) * twoPi;
+        final int rayCount = angleBins;
+        AtomicInteger completed = progress == null ? null : new AtomicInteger();
+        Object progressLock = progress == null ? null : new Object();
+        IntStream.range(0, rayCount).parallel().forEach(ai -> {
+            double theta = (ai / (double) rayCount) * twoPi;
             castRayDDA(grid, obsPx[0], obsPx[1], Math.cos(theta), Math.sin(theta),
-                    observerLatDeg, observerLonDeg, eyeLevel, visible);
-            if (progress != null) progress.accept(ai + 1);
-        }
+                    context, visible);
+            if (progress != null) {
+                int current = completed.incrementAndGet();
+                synchronized (progressLock) {
+                    progress.accept(current);
+                }
+            }
+        });
         return visible;
     }
 
+    private static final class RaycastContext {
+        final double observerLonDeg;
+        final double observerLatRad;
+        final double observerSinLat;
+        final double observerCosLat;
+        final double observerSinLon;
+        final double observerCosLon;
+        final double observerX;
+        final double observerY;
+        final double observerZ;
+        final double upX;
+        final double upY;
+        final double upZ;
+        final double originTileX;
+        final double originTileY;
+        final double inverseWorldSize;
+        final double inverseTileSize;
+
+        RaycastContext(ElevationService.ElevationGrid grid, double observerLatDeg,
+                       double observerLonDeg, double eyeLevel) {
+            this.observerLonDeg = observerLonDeg;
+            observerLatRad = Math.toRadians(observerLatDeg);
+            double observerLonRad = Math.toRadians(observerLonDeg);
+            observerSinLat = Math.sin(observerLatRad);
+            observerCosLat = Math.cos(observerLatRad);
+            observerSinLon = Math.sin(observerLonRad);
+            observerCosLon = Math.cos(observerLonRad);
+            double radius = WGS84_SEMI_MAJOR / Math.sqrt(
+                    1.0 - WGS84_ECCENTRICITY_SQUARED * observerSinLat * observerSinLat);
+            observerX = (radius + eyeLevel) * observerCosLat * observerCosLon;
+            observerY = (radius + eyeLevel) * observerCosLat * observerSinLon;
+            observerZ = (radius * (1.0 - WGS84_ECCENTRICITY_SQUARED) + eyeLevel) * observerSinLat;
+            upX = observerCosLat * observerCosLon;
+            upY = observerCosLat * observerSinLon;
+            upZ = observerSinLat;
+
+            int radiusTiles = (grid.tilesWide - 1) / 2;
+            originTileX = grid.centerTileX - radiusTiles;
+            originTileY = grid.centerTileY - radiusTiles;
+            inverseWorldSize = 1.0 / Math.pow(2.0, grid.zoom);
+            inverseTileSize = 1.0 / grid.tileSize;
+        }
+    }
+
     private static void castRayDDA(ElevationService.ElevationGrid grid, double ox, double oy, double dirX, double dirY,
-                                   double observerLatDeg, double observerLonDeg, double eyeLevel,
+                                   RaycastContext context,
                                    boolean[][] visible) {
         int w = grid.width, h = grid.height;
-        // Normalize direction to avoid scaling artifacts
-        double len = Math.hypot(dirX, dirY);
-        dirX /= len; dirY /= len;
-
         // DDA setup
         int x = (int)Math.floor(ox);
         int y = (int)Math.floor(oy);
@@ -115,20 +168,21 @@ public final class VisibilityEngine {
             double segmentEnd = Math.min(tMaxX, tMaxY);
             double segmentLength = segmentEnd - segmentStart;
             double cellMaxAngle = -Double.MAX_VALUE;
-            // A DEM sample can be a narrow peak. Three samples retain peaks at
+            double baseX = ox + segmentStart * dirX;
+            double baseY = oy + segmentStart * dirY;
+            // A DEM sample can be a narrow peak. Five samples retain peaks at
             // either edge or in the middle while keeping the raycast tractable.
             for (double fraction : SEGMENT_SAMPLE_FRACTIONS) {
-                double sampleT = segmentStart + segmentLength * fraction;
-                double sampleX = ox + sampleT * dirX;
-                double sampleY = oy + sampleT * dirY;
+                double sampleDistance = segmentLength * fraction;
+                double sampleX = baseX + sampleDistance * dirX;
+                double sampleY = baseY + sampleDistance * dirY;
                 double v = sampleBilinear(grid, sampleX, sampleY);
                 if (Double.isNaN(v)) {
                     // A missing DEM cell is unknown, not empty terrain. Do not
                     // allow a ray to claim visibility through missing data.
                     return;
                 }
-                cellMaxAngle = Math.max(cellMaxAngle, sphericalSightAngle(
-                        observerLatDeg, observerLonDeg, grid, sampleX, sampleY, v, eyeLevel));
+                cellMaxAngle = Math.max(cellMaxAngle, sightAngle(context, sampleX, sampleY, v));
             }
             if (cellMaxAngle >= maxSlope) {
                 visible[y][x] = true;
@@ -159,43 +213,47 @@ public final class VisibilityEngine {
                 + (c * (1.0 - tx) + d * tx) * ty;
     }
 
-    /**
-     * Returns the elevation angle from the observer to a terrain point on a
-     * spherical Earth. This compares rays in the observer's local tangent
-     * plane and therefore includes curvature without a small-angle approximation.
-     */
-    private static double sphericalSightAngle(double observerLatDeg, double observerLonDeg,
-                                              ElevationService.ElevationGrid grid,
-                                              double sampleX, double sampleY,
-                                              double terrainElevation, double eyeLevel) {
-        double[] sampleLatLon = gridPixelToLatLon(grid, sampleX, sampleY);
-        double lat1 = Math.toRadians(observerLatDeg);
-        double lat2 = Math.toRadians(sampleLatLon[0]);
-        double deltaLat = lat2 - lat1;
-        double deltaLon = Math.toRadians(shortestLongitudeDelta(sampleLatLon[1] - observerLonDeg));
+    private static double sightAngle(RaycastContext context, double sampleX, double sampleY,
+                                     double terrainElevation) {
+        double globalX = context.originTileX + (sampleX + 0.5) * context.inverseTileSize;
+        double globalY = context.originTileY + (sampleY + 0.5) * context.inverseTileSize;
+        double targetLonDeg = normalizeLongitude(
+                globalX * context.inverseWorldSize * 360.0 - 180.0);
+        double mercator = Math.PI * (1.0 - 2.0 * globalY * context.inverseWorldSize);
+        double targetLatDeg = Math.toDegrees(Math.atan(Math.sinh(mercator)));
+
+        double lat2 = Math.toRadians(targetLatDeg);
+        double deltaLat = lat2 - context.observerLatRad;
+        double deltaLon = Math.toRadians(shortestLongitudeDelta(targetLonDeg - context.observerLonDeg));
         double haversine = Math.sin(deltaLat * 0.5) * Math.sin(deltaLat * 0.5)
-                + Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLon * 0.5) * Math.sin(deltaLon * 0.5);
-        double centralAngle = 2.0 * Math.atan2(Math.sqrt(haversine), Math.sqrt(Math.max(0.0, 1.0 - haversine)));
-        if (centralAngle < 1.0e-12) return -Double.MAX_VALUE;
+                + context.observerCosLat * Math.cos(lat2)
+                * Math.sin(deltaLon * 0.5) * Math.sin(deltaLon * 0.5);
+        // The central angle is only used to reject the observer point. Avoid
+        // atan2 here; the exact angle is not needed for the sight-angle test.
+        if (haversine < 2.5e-25) return -Double.MAX_VALUE;
 
-        final double earthRadiusMeters = 6_371_008.8;
-        double terrainRadius = earthRadiusMeters + terrainElevation;
-        double observerRadius = earthRadiusMeters + eyeLevel;
-        double vertical = terrainRadius * Math.cos(centralAngle) - observerRadius;
-        double horizontal = terrainRadius * Math.sin(centralAngle);
-        return Math.atan2(vertical, horizontal);
+        double targetSinLat = Math.sin(lat2);
+        double targetCosLat = Math.cos(lat2);
+        double targetLonRad = Math.toRadians(targetLonDeg);
+        double targetRadius = WGS84_SEMI_MAJOR / Math.sqrt(
+                1.0 - WGS84_ECCENTRICITY_SQUARED * targetSinLat * targetSinLat);
+        double targetX = (targetRadius + terrainElevation) * targetCosLat * Math.cos(targetLonRad);
+        double targetY = (targetRadius + terrainElevation) * targetCosLat * Math.sin(targetLonRad);
+        double targetZ = (targetRadius * (1.0 - WGS84_ECCENTRICITY_SQUARED)
+                + terrainElevation) * targetSinLat;
+        double dx = targetX - context.observerX;
+        double dy = targetY - context.observerY;
+        double dz = targetZ - context.observerZ;
+        double vertical = dx * context.upX + dy * context.upY + dz * context.upZ;
+        double distanceSquared = dx * dx + dy * dy + dz * dz;
+        double horizontalSquared = Math.max(0.0, distanceSquared - vertical * vertical);
+        if (distanceSquared < 1.0e-12) return -Double.MAX_VALUE;
+        // atan2 is monotonic over the possible sight-angle range, so compare
+        // its tangent instead. This avoids one expensive transcendental call
+        // for every sample while preserving the ordering used by the raycast.
+        return vertical / Math.sqrt(horizontalSquared);
     }
 
-    private static double[] gridPixelToLatLon(ElevationService.ElevationGrid grid, double px, double py) {
-        int radiusTiles = (grid.tilesWide - 1) / 2;
-        double n = Math.pow(2.0, grid.zoom);
-        double globalX = grid.centerTileX - radiusTiles + px / grid.tileSize;
-        double globalY = grid.centerTileY - radiusTiles + py / grid.tileSize;
-        double lon = normalizeLongitude(globalX / n * 360.0 - 180.0);
-        double mercator = Math.PI * (1.0 - 2.0 * globalY / n);
-        double lat = Math.toDegrees(Math.atan(Math.sinh(mercator)));
-        return new double[]{lat, lon};
-    }
 
     private static double shortestLongitudeDelta(double delta) {
         double result = delta % 360.0;
@@ -226,8 +284,8 @@ public final class VisibilityEngine {
         int dxTilesInt = xTile - grid.centerTileX;
         dxTilesInt = (int) Math.round(((dxTilesInt + n / 2.0) % n) - n / 2.0);
         int dyTilesInt = yTile - grid.centerTileY;
-        double px = (dxTilesInt + radiusTiles) * (double) grid.tileSize + fracX * grid.tileSize;
-        double py = (dyTilesInt + radiusTiles) * (double) grid.tileSize + fracY * grid.tileSize;
+        double px = (dxTilesInt + radiusTiles) * (double) grid.tileSize + fracX * grid.tileSize - 0.5;
+        double py = (dyTilesInt + radiusTiles) * (double) grid.tileSize + fracY * grid.tileSize - 0.5;
         return new double[]{px, py};
     }
     private static double[] latLonToTileFractional(double latDeg, double lonDeg, int zoom) {
