@@ -13,6 +13,7 @@ import tools.jackson.dataformat.smile.SmileFactory;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.HashMap;
+import java.util.concurrent.Executor;
 
 public class TileCache {
     private final Path cacheDir;
@@ -40,10 +41,14 @@ public class TileCache {
     }
 
     public TileCache(String cachePath, ElevationProvider provider) {
+        this(cachePath, provider, Runnable::run);
+    }
+
+    public TileCache(String cachePath, ElevationProvider provider, Executor downloadExecutor) {
         this.cacheDir = Paths.get(cachePath);
         this.provider = provider == null ? ElevationProvider.TERRARIUM : provider;
         this.copernicus = this.provider == ElevationProvider.COPERNICUS_GLO30
-                ? new CopernicusGlo30TileCache(cacheDir) : null;
+                ? new CopernicusGlo30TileCache(cacheDir, downloadExecutor) : null;
         try {
             Files.createDirectories(cacheDir);
         } catch (IOException e) {
@@ -117,6 +122,11 @@ public class TileCache {
     public String prefetchCoverageKey(int zoom, int x, int y) {
         if (provider != ElevationProvider.COPERNICUS_GLO30) return zoom + ":" + x + ":" + y;
         return copernicus.prefetchCoverageKey(zoom, x, y);
+    }
+
+    public String prefetchAvailableCoverageKey(int zoom, int x, int y) {
+        if (provider != ElevationProvider.COPERNICUS_GLO30) return zoom + ":" + x + ":" + y;
+        return copernicus.prefetchAvailableCoverageKey(zoom, x, y);
     }
 
     /** Ensures the source data needed for a tile is present in the provider's native cache. */

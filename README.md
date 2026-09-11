@@ -101,17 +101,24 @@ Downloads tiles into a local cache for later CLI operations.
 - `--zoom`, or `--zMin` and `--zMax`: requested zoom level or range
 - `--cache`: destination cache directory
 - `--tfKey`: required for `thunder` tiles
+- `--threads`: concurrent Copernicus prefetch workers, default `8`
 
 Prefetch displays a stable overall progress bar while it processes the planned
 tile set. The bar advances for both successful and failed tiles, and the final
 summary reports ready and failed counts. A zoom range is processed from the
 lowest requested zoom to the highest; bounding boxes crossing the antimeridian
 are supported. Its bounded tile-coverage projection uses `#` for ready tiles,
-`x` for failed tiles, and `.` for tiles not yet processed. Copernicus COG
-downloads use up to four bounded workers, and overlapping web tiles are
+`x` for failed tiles, and `.` for tiles not yet processed. For Copernicus,
+the preview is a longitude/latitude grid of published one-degree COG cells,
+so it roughly follows the geographic shape of the requested area rather than
+the Web Mercator download tiles. Copernicus COG downloads use a dedicated
+bounded network worker pool controlled by `--threads`, and overlapping web tiles are
 deduplicated so each required one-degree COG is processed once, including
-across a requested zoom range. Some ocean and restricted GLO-30 cells are not
-published; those are reported as failed tiles and produce HTTP 404 responses.
+across a requested zoom range. A tile that touches multiple COGs downloads
+those COGs concurrently as well.
+VERA downloads and caches the bucket's
+`tileList.txt` availability index first, so unpublished ocean and restricted
+GLO-30 cells are skipped instead of generating 404 download failures.
 
 Elevation tiles use a bounded in-memory decoded cache and an atomic on-disk Smile cache. Terrarium source PNGs are stored under `terrarium/`, while Copernicus source data is retained as COGs under `cog/`. Copernicus prefetch ensures the required COGs are present without generating decoded tiles; normal elevation reads populate the geographic, provider-prefixed Smile files under `decoded/`. Source files and decoded values are safe to delete and will be rebuilt.
 

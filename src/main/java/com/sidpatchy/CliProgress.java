@@ -4,6 +4,8 @@ import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 
 import java.io.PrintWriter;
+import java.util.HashSet;
+import java.util.Set;
 
 /** Small terminal UI used by the CLI for long-running operations. */
 public final class CliProgress implements AutoCloseable {
@@ -20,6 +22,9 @@ public final class CliProgress implements AutoCloseable {
     private int mapWidth;
     private int mapHeight;
     private char[][] tileMap;
+    private Set<String> coverageCells;
+    private Set<String> completedCoverage = new HashSet<>();
+    private Set<String> failedCoverage = new HashSet<>();
 
     private CliProgress(Terminal terminal) {
         this.terminal = terminal;
@@ -109,6 +114,66 @@ public final class CliProgress implements AutoCloseable {
         }
         renderedMapLines = height + 2;
         out.flush();
+    }
+
+    /** Draws Copernicus' one-degree cells in a longitude/latitude grid. */
+    public void coverageMap(String label, int current, int total, Set<String> allCells,
+                            String completedCells, boolean succeeded) {
+        clearMap();
+        if (coverageCells != allCells) {
+            coverageCells = allCells;
+            completedCoverage = new HashSet<>();
+            failedCoverage = new HashSet<>();
+        }
+        Set<String> cells = parseCoverageCells(completedCells);
+        (succeeded ? completedCoverage : failedCoverage).addAll(cells);
+
+        int minLon = Integer.MAX_VALUE;
+        int maxLon = Integer.MIN_VALUE;
+        int minLat = Integer.MAX_VALUE;
+        int maxLat = Integer.MIN_VALUE;
+        for (String cell : coverageCells) {
+            int[] coordinate = parseCoverageCell(cell);
+            minLat = Math.min(minLat, coordinate[0]);
+            maxLat = Math.max(maxLat, coordinate[0]);
+            minLon = Math.min(minLon, coordinate[1]);
+            maxLon = Math.max(maxLon, coordinate[1]);
+        }
+        int width = Math.min(MAP_WIDTH, Math.max(1, maxLon - minLon + 1));
+        int height = Math.min(MAP_HEIGHT, Math.max(1, maxLat - minLat + 1));
+        char[][] map = new char[height][width];
+        for (char[] row : map) java.util.Arrays.fill(row, '.');
+        for (String cell : coverageCells) {
+            int[] coordinate = parseCoverageCell(cell);
+            int x = (coordinate[1] - minLon) * width / Math.max(1, maxLon - minLon + 1);
+            int y = (maxLat - coordinate[0]) * height / Math.max(1, maxLat - minLat + 1);
+            map[y][x] = completedCoverage.contains(cell) ? '#' :
+                    (failedCoverage.contains(cell) ? 'x' : '.');
+        }
+
+        out.print(progressLine(label, current, total));
+        out.println();
+        out.println("Coverage (published one-degree COG cells)");
+        for (char[] row : map) {
+            out.print("  ");
+            out.println(row);
+        }
+        renderedMapLines = height + 2;
+        out.flush();
+    }
+
+    private static Set<String> parseCoverageCells(String coverage) {
+        Set<String> cells = new HashSet<>();
+        if (coverage == null || coverage.isEmpty()) return cells;
+        for (String cell : coverage.split(",")) {
+            if (!cell.isEmpty()) cells.add(cell);
+        }
+        return cells;
+    }
+
+    private static int[] parseCoverageCell(String cell) {
+        String[] parts = cell.split(":", 2);
+        return new int[]{Integer.parseInt(parts[0]), Integer.parseInt(parts[1])};
     }
 
     private void clearMap() {

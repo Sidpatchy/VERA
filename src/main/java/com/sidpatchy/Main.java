@@ -19,9 +19,12 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Executor;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
 
 public class Main {
+    private static final int DEFAULT_PREFETCH_THREADS = 8;
     private record PrefetchTile(int zoom, int x, int y) { }
 
     private static List<PrefetchTile> planPrefetchTiles(
@@ -81,7 +84,7 @@ public class Main {
                 "                                           Optionally export stitched elevation/curvature maps\n" +
                 "                                           Output formats: .png, .jpg/.jpeg, .webp, .kmz\n" +
                 "  prefetch --type <terrain|carto|thunder> --source <terrarium|copernicus> --minLat <v> --minLon <v> --maxLat <v> --maxLon <v>\n" +
-                "           [--zoom <z> | --zMin <z> --zMax <z>] [--cache <dir>] [--tfKey <key>]\n" +
+                "           [--zoom <z> | --zMin <z> --zMax <z>] [--cache <dir>] [--tfKey <key>] [--threads <n>]\n" +
                 "                                           Bulk download tiles into local cache\n" +
                 "  server [--port <n>] [--cache <dir>] [--output <dir>]\n" +
                 "                                           Start the asynchronous viewshed HTTP API\n");
@@ -270,6 +273,7 @@ public class Main {
                 int zMax = hasZoom ? Integer.parseInt(p.get("zoom")) : Integer.parseInt(p.getOrDefault("zMax", "0"));
                 if (zMax < zMin) { int tmp = zMin; zMin = zMax; zMax = tmp; }
                 String cacheDir = p.getOrDefault("cache", type.equals("carto") ? "./carto_cache" : (type.equals("thunder") ? "./thunder_cache" : "./terrain_cache"));
+                int prefetchThreads = Integer.parseInt(p.getOrDefault("threads", String.valueOf(DEFAULT_PREFETCH_THREADS)));
 
                 String tfKey = p.get("tfKey");
                 if (!type.equals("terrain") && !type.equals("carto") && !type.equals("thunder")) {
@@ -288,6 +292,11 @@ public class Main {
                     progress.close();
                     return;
                 }
+                if (prefetchThreads < 1) {
+                    System.err.println("--threads must be at least 1");
+                    progress.close();
+                    return;
+                }
 
                 // clamp inputs
                 minLat = Math.max(-85.05112878, Math.min(85.05112878, minLat));
@@ -299,21 +308,38 @@ public class Main {
                 while (maxLon > 180) { maxLon -= 360; }
 
                 List<PrefetchTile> tiles = planPrefetchTiles(minLat, minLon, maxLat, maxLon, zMin, zMax);
-                TileCache terrainCache = type.equals("terrain") ? new TileCache(cacheDir, provider) : null;
+                ThreadFactory downloadThreadFactory = runnable -> {
+                    Thread thread = new Thread(runnable, "copernicus-download");
+                    thread.setDaemon(true);
+                    return thread;
+                };
+                ExecutorService downloads = type.equals("terrain") && provider == ElevationProvider.COPERNICUS_GLO30
+                        ? Executors.newFixedThreadPool(prefetchThreads, downloadThreadFactory) : null;
+                Executor downloadExecutor = downloads == null ? Runnable::run : downloads;
+                TileCache terrainCache = type.equals("terrain")
+                        ? new TileCache(cacheDir, provider, downloadExecutor) : null;
+                Map<PrefetchTile, String> coverageByTile = new HashMap<>();
                 if (terrainCache != null && provider == ElevationProvider.COPERNICUS_GLO30) {
                     Set<String> seenCoverage = new HashSet<>();
                     tiles.removeIf(tile -> {
-                        String coverageKey = terrainCache.prefetchCoverageKey(tile.zoom(), tile.x(), tile.y());
+                        String coverageKey = terrainCache.prefetchAvailableCoverageKey(
+                                tile.zoom(), tile.x(), tile.y());
+                        if (coverageKey.isEmpty()) return true;
                         boolean hasNewCell = false;
                         for (String cell : coverageKey.split(",")) {
                             if (seenCoverage.add(cell)) hasNewCell = true;
                         }
+                        if (hasNewCell) coverageByTile.put(tile, coverageKey);
                         return !hasNewCell;
                     });
                 }
                 int total = tiles.size();
                 int success = 0;
                 int processed = 0;
+                Set<String> coverageCells = new HashSet<>();
+                coverageByTile.values().forEach(key -> {
+                    for (String cell : key.split(",")) coverageCells.add(cell);
+                });
                 com.sidpatchy.Tile.CartoTileCache cartoCache = type.equals("carto")
                         ? new com.sidpatchy.Tile.CartoTileCache(cacheDir, p.get("cartoKey")) : null;
                 ThunderforestTileCache thunderCache = type.equals("thunder")
@@ -329,7 +355,7 @@ public class Main {
                     bounds[3] = Math.max(bounds[3], tile.y());
                 }
                 boolean parallelTerrain = terrainCache != null && provider == ElevationProvider.COPERNICUS_GLO30;
-                ExecutorService workers = parallelTerrain ? Executors.newFixedThreadPool(4) : null;
+                ExecutorService workers = parallelTerrain ? Executors.newFixedThreadPool(prefetchThreads) : null;
                 List<Future<Void>> futures = parallelTerrain ? new ArrayList<>(tiles.size()) : null;
                 if (parallelTerrain) {
                     for (PrefetchTile tile : tiles) {
@@ -362,13 +388,19 @@ public class Main {
                                     + ": " + (e.getMessage() == null ? e : e.getMessage()));
                         }
                         processed++;
-                        int[] bounds = mapBounds.get(tile.zoom());
-                        progress.tileMap("Prefetching " + type + " (z" + tile.zoom() + ")",
-                                processed, total, tile.zoom(), tile.x(), tile.y(),
-                                bounds[0], bounds[1], bounds[2], bounds[3], succeeded);
+                        if (provider == ElevationProvider.COPERNICUS_GLO30 && terrainCache != null) {
+                            progress.coverageMap("Prefetching " + type, processed, total, coverageCells,
+                                    coverageByTile.get(tile), succeeded);
+                        } else {
+                            int[] bounds = mapBounds.get(tile.zoom());
+                            progress.tileMap("Prefetching " + type + " (z" + tile.zoom() + ")",
+                                    processed, total, tile.zoom(), tile.x(), tile.y(),
+                                    bounds[0], bounds[1], bounds[2], bounds[3], succeeded);
+                        }
                     }
                 } finally {
                     if (workers != null) workers.shutdown();
+                    if (downloads != null) downloads.shutdown();
                 }
                 progress.complete("Prefetching " + type);
                 System.out.println("Prefetch complete: " + success + "/" + total + " tiles ready ("

@@ -4,19 +4,24 @@ import javax.imageio.ImageIO;
 import com.twelvemonkeys.imageio.plugins.tiff.TIFFImageReaderSpi;
 import java.awt.image.Raster;
 import java.io.IOException;
+import java.io.BufferedInputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import javax.imageio.ImageReader;
 import javax.imageio.stream.ImageInputStream;
 
@@ -25,19 +30,29 @@ import javax.imageio.stream.ImageInputStream;
  */
 final class CopernicusGlo30TileCache {
     private static final String BUCKET = "https://copernicus-dem-30m.s3.amazonaws.com/";
+    private static final String TILE_LIST_URL = BUCKET + "tileList.txt";
     private final Path cacheDir;
+    private final Path tileListPath;
+    private final Executor downloadExecutor;
     private final Map<Path, CompletableFuture<Void>> activeDownloads = new ConcurrentHashMap<>();
     private final Map<String, Raster> sourceImages = new LinkedHashMap<>(4, 0.75f, true) {
         @Override protected boolean removeEldestEntry(Map.Entry<String, Raster> eldest) {
             return size() > 2;
         }
     };
+    private volatile Set<String> availableStems;
     private Raster activeRaster;
     private int activeSouth;
     private int activeWest;
 
     CopernicusGlo30TileCache(Path cacheDir) {
+        this(cacheDir, Runnable::run);
+    }
+
+    CopernicusGlo30TileCache(Path cacheDir, Executor downloadExecutor) {
         this.cacheDir = cacheDir;
+        this.tileListPath = cacheDir.resolve("cog").resolve("tileList.txt");
+        this.downloadExecutor = downloadExecutor;
     }
 
     float[][] getElevationData(int zoom, int x, int y) throws IOException {
@@ -67,15 +82,34 @@ final class CopernicusGlo30TileCache {
         int eastCell = Math.max(-180, Math.min(179, (int) Math.floor(Math.nextDown(east))));
         int southCell = Math.max(-90, Math.min(89, (int) Math.floor(south)));
         int northCell = Math.max(-90, Math.min(89, (int) Math.floor(north)));
+        List<CompletableFuture<Void>> downloads = new ArrayList<>();
         for (int cellSouth = southCell; cellSouth <= northCell; cellSouth++) {
             for (int cellWest = westCell; cellWest <= eastCell; cellWest++) {
-                ensureDownloaded(cogPath(cellSouth, cellWest), cogStem(cellSouth, cellWest));
+                String stem = cogStem(cellSouth, cellWest);
+                if (availableStems().contains(stem)) {
+                    downloads.add(ensureDownloadedAsync(cogPath(cellSouth, cellWest), stem));
+                }
             }
+        }
+        try {
+            CompletableFuture.allOf(downloads.toArray(CompletableFuture[]::new)).join();
+        } catch (CompletionException e) {
+            if (e.getCause() instanceof IOException ioException) throw ioException;
+            throw e;
         }
     }
 
     /** Returns the one-degree COG cells touched by a web-mercator tile. */
     String prefetchCoverageKey(int zoom, int x, int y) {
+        return coverageKey(zoom, x, y, false);
+    }
+
+    /** Returns only published COG cells touched by a web-mercator tile. */
+    String prefetchAvailableCoverageKey(int zoom, int x, int y) {
+        return coverageKey(zoom, x, y, true);
+    }
+
+    private String coverageKey(int zoom, int x, int y, boolean publishedOnly) {
         int n = 1 << zoom;
         int wrappedX = Math.floorMod(x, n);
         double west = (double) wrappedX / n * 360.0 - 180.0;
@@ -87,12 +121,70 @@ final class CopernicusGlo30TileCache {
         int southCell = Math.max(-90, Math.min(89, (int) Math.floor(south)));
         int northCell = Math.max(-90, Math.min(89, (int) Math.floor(north)));
         Set<String> cells = new TreeSet<>();
+        Set<String> published = publishedOnly ? availableStems() : Set.of();
         for (int cellSouth = southCell; cellSouth <= northCell; cellSouth++) {
             for (int cellWest = westCell; cellWest <= eastCell; cellWest++) {
-                cells.add(cellSouth + ":" + cellWest);
+                if (!publishedOnly || published.contains(cogStem(cellSouth, cellWest))) {
+                    cells.add(cellSouth + ":" + cellWest);
+                }
             }
         }
         return String.join(",", cells);
+    }
+
+    static boolean isTileListEntry(String line) {
+        return line != null && line.startsWith("Copernicus_DSM_COG_10_") && line.endsWith("_DEM");
+    }
+
+    private Set<String> availableStems() {
+        Set<String> result = availableStems;
+        if (result != null) return result;
+        synchronized (this) {
+            result = availableStems;
+            if (result == null) {
+                try {
+                    Files.createDirectories(tileListPath.getParent());
+                    if (!Files.exists(tileListPath) || Files.size(tileListPath) == 0) {
+                        downloadTileList();
+                    }
+                    Set<String> loaded = new HashSet<>();
+                    for (String line : Files.readAllLines(tileListPath)) {
+                        String trimmed = line.trim();
+                        if (isTileListEntry(trimmed)) loaded.add(trimmed);
+                    }
+                    if (loaded.isEmpty()) {
+                        throw new IOException("Copernicus tile list is empty: " + tileListPath);
+                    }
+                    result = Set.copyOf(loaded);
+                    availableStems = result;
+                } catch (IOException e) {
+                    throw new IllegalStateException("Unable to load Copernicus tile index: " + TILE_LIST_URL, e);
+                }
+            }
+            return result;
+        }
+    }
+
+    private void downloadTileList() throws IOException {
+        Path part = Files.createTempFile(tileListPath.getParent(), "tileList", ".part");
+        HttpURLConnection connection = (HttpURLConnection) URI.create(TILE_LIST_URL).toURL().openConnection();
+        connection.setConnectTimeout(30_000);
+        connection.setReadTimeout(120_000);
+        connection.setInstanceFollowRedirects(true);
+        try {
+            if (connection.getResponseCode() / 100 != 2) {
+                throw new IOException("Unable to download Copernicus tile index: HTTP "
+                        + connection.getResponseCode() + " for " + connection.getURL());
+            }
+            try (InputStream in = connection.getInputStream()) {
+                Files.copy(in, part, StandardCopyOption.REPLACE_EXISTING);
+            }
+            if (Files.size(part) == 0) throw new IOException("Downloaded empty Copernicus tile index");
+            Files.move(part, tileListPath, StandardCopyOption.REPLACE_EXISTING);
+        } finally {
+            connection.disconnect();
+            Files.deleteIfExists(part);
+        }
     }
 
     private static double latitudeAtTileEdge(int y, int tileCount) {
@@ -157,7 +249,22 @@ final class CopernicusGlo30TileCache {
     }
 
     private void ensureDownloaded(Path local, String stem) throws IOException {
-        if (Files.exists(local) && Files.size(local) > 0) return;
+        try {
+            ensureDownloadedAsync(local, stem).join();
+        } catch (CompletionException e) {
+            if (e.getCause() instanceof IOException ioException) throw ioException;
+            throw e;
+        }
+    }
+
+    private CompletableFuture<Void> ensureDownloadedAsync(Path local, String stem) {
+        try {
+            if (Files.exists(local) && Files.size(local) > 0) {
+                return CompletableFuture.completedFuture(null);
+            }
+        } catch (IOException e) {
+            return CompletableFuture.failedFuture(e);
+        }
         CompletableFuture<Void> download = new CompletableFuture<>();
         CompletableFuture<Void> existing = activeDownloads.putIfAbsent(local, download);
         if (existing == null) {
@@ -168,15 +275,10 @@ final class CopernicusGlo30TileCache {
                 } catch (Exception e) {
                     download.completeExceptionally(e);
                 }
-            }).whenComplete((ignored, error) -> activeDownloads.remove(local, download));
+            }, downloadExecutor).whenComplete((ignored, error) -> activeDownloads.remove(local, download));
             existing = download;
         }
-        try {
-            existing.join();
-        } catch (CompletionException e) {
-            if (e.getCause() instanceof IOException ioException) throw ioException;
-            throw e;
-        }
+        return existing;
     }
 
     private void downloadFile(Path local, String stem) throws IOException {
@@ -192,7 +294,7 @@ final class CopernicusGlo30TileCache {
                 throw new IOException("Unable to download Copernicus COG: HTTP "
                         + connection.getResponseCode() + " for " + connection.getURL());
             }
-            try (InputStream in = connection.getInputStream()) {
+            try (InputStream in = new BufferedInputStream(connection.getInputStream(), 1024 * 1024)) {
                 Files.copy(in, part, StandardCopyOption.REPLACE_EXISTING);
                 if (Files.size(part) == 0) {
                     throw new IOException("Downloaded empty Copernicus COG: " + local);

@@ -34,4 +34,5 @@ class MainTest {
         assertEquals(cache.prefetchCoverageKey(12, 1000, 1500),
                 cache.prefetchCoverageKey(13, 2000, 3000));
     }
+
 }
