@@ -17,7 +17,7 @@ class CurvatureModelTest {
 
         ElevationService.ElevationGrid adjusted = CurvatureModel.applyObserverCurvature(
                 grid, 0.0, 0.0, ElevationService.ObserverHeightMode.AGL, 100_000.0,
-                null, 6_371_008.8, "build/test-curvature-cache", false);
+                null, "build/test-curvature-cache", false);
 
         assertTrue(adjusted.data[1][1] < 99.99999f,
                 "curvature must be applied before the geometric horizon");

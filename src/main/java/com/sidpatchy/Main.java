@@ -10,19 +10,70 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public class Main {
+    private record PrefetchTile(int zoom, int x, int y) { }
+
+    private static List<PrefetchTile> planPrefetchTiles(
+            double minLat, double minLon, double maxLat, double maxLon, int zMin, int zMax) {
+        List<PrefetchTile> tiles = new ArrayList<>();
+        for (int z = zMin; z <= zMax; z++) {
+            int n = 1 << z;
+            int yMin = latitudeToTileY(maxLat, n);
+            int yMax = latitudeToTileY(minLat, n);
+            int xMin = longitudeToTileX(minLon, n);
+            int xMax = longitudeToTileX(maxLon, n);
+
+            if (minLon == -180.0 && maxLon == 180.0) {
+                addPrefetchTiles(tiles, z, 0, n - 1, yMin, yMax);
+            } else if (xMax < xMin) {
+                addPrefetchTiles(tiles, z, 0, xMax, yMin, yMax);
+                addPrefetchTiles(tiles, z, xMin, n - 1, yMin, yMax);
+            } else {
+                addPrefetchTiles(tiles, z, xMin, xMax, yMin, yMax);
+            }
+        }
+        return tiles;
+    }
+
+    private static void addPrefetchTiles(
+            List<PrefetchTile> tiles, int zoom, int xMin, int xMax, int yMin, int yMax) {
+        for (int x = xMin; x <= xMax; x++) {
+            for (int y = yMin; y <= yMax; y++) {
+                tiles.add(new PrefetchTile(zoom, x, y));
+            }
+        }
+    }
+
+    private static int latitudeToTileY(double latitude, int tileCount) {
+        double sine = Math.sin(Math.toRadians(latitude));
+        double mercatorY = Math.log((1 + sine) / (1 - sine));
+        int y = (int) Math.floor((1 - mercatorY / (2 * Math.PI)) / 2 * tileCount);
+        return Math.max(0, Math.min(tileCount - 1, y));
+    }
+
+    private static int longitudeToTileX(double longitude, int tileCount) {
+        int x = (int) Math.floor((longitude + 180.0) / 360.0 * tileCount);
+        return Math.floorMod(x, tileCount);
+    }
     private static void printUsage() {
         System.out.println("VERA CLI\n" +
                 "Commands:\n" +
                 "  elevation --lat <v> --lon <v> [--zoom <z>] [--source <terrarium|copernicus>] [--cache <dir>]\n" +
                 "                                           Print elevation (meters) at lat/lon\n" +
-                "  los --lat <v> --lon <v> [--zoom <z>] [--agl <m>] [--radius <tiles>]\n" +
+                "  los --lat <v> --lon <v> [--zoom <z>] [--agl <m>] [--radius <distance>]\n" +
                 "      [--angleBins <n>] [--overlay] [--tfKey <key>] [--out <file>]\n" +
                 "      [--elevation-out <file>] [--curvature-out <file>] [--source <terrarium|copernicus>]\n" +
                 "                                           Generate LOS image/KMZ (optionally overlay on TF)\n" +
+                "                                           --radius accepts km, mi, m, or ft (for example 40km); default: 200km\n" +
+                "                                           Bare integer radii remain supported as legacy tile-radius values\n" +
                 "                                           Optionally export stitched elevation/curvature maps\n" +
                 "                                           Output formats: .png, .jpg/.jpeg, .webp, .kmz\n" +
                 "  prefetch --type <terrain|carto|thunder> --source <terrarium|copernicus> --minLat <v> --minLon <v> --maxLat <v> --maxLon <v>\n" +
@@ -79,7 +130,8 @@ public class Main {
                 double lon = Double.parseDouble(p.get("lon"));
                 int zoom = Integer.parseInt(p.getOrDefault("zoom", "12"));
                 double agl = Double.parseDouble(p.getOrDefault("agl", "10.0"));
-                int radius = Integer.parseInt(p.getOrDefault("radius", "22"));
+                String radiusArgument = p.getOrDefault("radius", "200km");
+                int radius = parseRadiusTiles(radiusArgument, lat, zoom);
                 int angleBins = Integer.parseInt(p.getOrDefault("angleBins", "1440"));
                 boolean overlay = Boolean.parseBoolean(p.getOrDefault("overlay", "false"));
                 String out = p.getOrDefault("out", overlay ? "./los_overlay.png" : "./los.png");
@@ -206,8 +258,19 @@ public class Main {
                 String cacheDir = p.getOrDefault("cache", type.equals("carto") ? "./carto_cache" : (type.equals("thunder") ? "./thunder_cache" : "./terrain_cache"));
 
                 String tfKey = p.get("tfKey");
+                if (!type.equals("terrain") && !type.equals("carto") && !type.equals("thunder")) {
+                    System.err.println("Unknown prefetch type: " + type + " (expected terrain, carto, or thunder)");
+                    progress.close();
+                    return;
+                }
                 if (type.equals("thunder") && (tfKey == null || tfKey.isBlank())) {
                     System.err.println("--type thunder requires --tfKey <key>");
+                    progress.close();
+                    return;
+                }
+
+                if (zMin < 0 || zMin > 30 || zMax > 30) {
+                    System.err.println("Zoom must be between 0 and 30");
                     progress.close();
                     return;
                 }
@@ -221,92 +284,70 @@ public class Main {
                 while (maxLon < -180) { maxLon += 360; }
                 while (maxLon > 180) { maxLon -= 360; }
 
-                int total = 0;
+                List<PrefetchTile> tiles = planPrefetchTiles(minLat, minLon, maxLat, maxLon, zMin, zMax);
+                int total = tiles.size();
                 int success = 0;
-                for (int z = zMin; z <= zMax; z++) {
-                    int n = 1 << z;
-                    // function to convert lat/lon to tile indices
-                    java.util.function.DoubleFunction<Integer> latToY = (lat) -> {
-                        double s = Math.sin(Math.toRadians(lat));
-                        double y = Math.log((1 + s) / (1 - s));
-                        int yy = (int) Math.floor((1 - y / (2 * Math.PI)) / 2 * n);
-                        if (yy < 0) yy = 0; if (yy >= n) yy = n - 1; return yy;
-                    };
-                    java.util.function.DoubleFunction<Integer> lonToX = (lon) -> {
-                        double xx = (lon + 180.0) / 360.0 * n;
-                        int xi = (int) Math.floor(xx);
-                        xi = ((xi % n) + n) % n; // wrap
-                        return xi;
-                    };
-
-                    int yMin = latToY.apply(maxLat); // note: TMS origin top-left
-                    int yMax = latToY.apply(minLat);
-
-                    // Handle bounding boxes that cross antimeridian by splitting
-                    double startLon = minLon;
-                    double endLon = maxLon;
-                    boolean wraps = endLon < startLon;
-                    int segments = wraps ? 2 : 1;
-                    for (int seg = 0; seg < segments; seg++) {
-                        double segMinLon = (seg == 0) ? startLon : -180.0;
-                        double segMaxLon = (seg == 0) ? 180.0 : endLon;
-                        int xMin = lonToX.apply(segMinLon);
-                        int xMax = lonToX.apply(segMaxLon);
-                        // If segment covers full world or wraps spanning index order
-                        boolean fullWorld = Math.abs(segMaxLon - segMinLon) >= 360.0 - 1e-9;
-                        if (fullWorld) { xMin = 0; xMax = n - 1; }
-
-                        if (!fullWorld && xMax < xMin) {
-                            // cover wrap by two loops
-                            int[] ranges = new int[]{0, xMax, xMin, n - 1};
-                            for (int r = 0; r < 2; r++) {
-                                int a = ranges[r * 2];
-                                int b = ranges[r * 2 + 1];
-                                for (int x = a; x <= b; x++) {
-                                    for (int y = yMin; y <= yMax; y++) {
-                                        total++;
-                                        try {
-                                            if (type.equals("terrain")) {
-                                                new TileCache(cacheDir, provider).getTile(z, x, y);
-                                            } else if (type.equals("carto")) {
-                                                new com.sidpatchy.Tile.CartoTileCache(cacheDir, p.get("cartoKey")).getTile(z, x, y);
-                                            } else {
-                                                new com.sidpatchy.Tile.ThunderforestTileCache(cacheDir, tfKey).getTile(z, x, y);
-                                            }
-                                            success++;
-                                            progress.bar("Downloading tiles", success, total);
-                                        } catch (Exception e) {
-                                            System.err.println("Failed z="+z+" x="+x+" y="+y+": "+e.getMessage());
-                                            progress.bar("Downloading tiles", success, total);
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            for (int x = xMin; x <= xMax; x++) {
-                                for (int y = yMin; y <= yMax; y++) {
-                                    total++;
-                                    try {
-                                        if (type.equals("terrain")) {
-                                            new TileCache(cacheDir, provider).getTile(z, x, y);
-                                        } else if (type.equals("carto")) {
-                                            new com.sidpatchy.Tile.CartoTileCache(cacheDir, p.get("cartoKey")).getTile(z, x, y);
-                                        } else {
-                                            new com.sidpatchy.Tile.ThunderforestTileCache(cacheDir, tfKey).getTile(z, x, y);
-                                        }
-                                        success++;
-                                        progress.bar("Downloading tiles", success, total);
-                                    } catch (Exception e) {
-                                        System.err.println("Failed z="+z+" x="+x+" y="+y+": "+e.getMessage());
-                                        progress.bar("Downloading tiles", success, total);
-                                    }
-                                }
-                            }
-                        }
+                int processed = 0;
+                TileCache terrainCache = type.equals("terrain") ? new TileCache(cacheDir, provider) : null;
+                com.sidpatchy.Tile.CartoTileCache cartoCache = type.equals("carto")
+                        ? new com.sidpatchy.Tile.CartoTileCache(cacheDir, p.get("cartoKey")) : null;
+                ThunderforestTileCache thunderCache = type.equals("thunder")
+                        ? new ThunderforestTileCache(cacheDir, tfKey) : null;
+                progress.bar("Prefetching " + type, 0, total);
+                Map<Integer, int[]> mapBounds = new HashMap<>();
+                for (PrefetchTile tile : tiles) {
+                    int[] bounds = mapBounds.computeIfAbsent(tile.zoom(), ignored ->
+                            new int[]{tile.x(), tile.x(), tile.y(), tile.y()});
+                    bounds[0] = Math.min(bounds[0], tile.x());
+                    bounds[1] = Math.max(bounds[1], tile.x());
+                    bounds[2] = Math.min(bounds[2], tile.y());
+                    bounds[3] = Math.max(bounds[3], tile.y());
+                }
+                boolean parallelTerrain = terrainCache != null && provider == ElevationProvider.COPERNICUS_GLO30;
+                ExecutorService workers = parallelTerrain ? Executors.newFixedThreadPool(4) : null;
+                List<Future<Void>> futures = parallelTerrain ? new ArrayList<>(tiles.size()) : null;
+                if (parallelTerrain) {
+                    for (PrefetchTile tile : tiles) {
+                        futures.add(workers.submit(() -> {
+                            terrainCache.prefetchTile(tile.zoom(), tile.x(), tile.y());
+                            return null;
+                        }));
                     }
                 }
-                progress.complete("Downloading tiles");
-                System.out.println("Prefetch complete. Downloaded " + success + "/" + total + " tiles to " + cacheDir);
+                try {
+                    for (int tileIndex = 0; tileIndex < tiles.size(); tileIndex++) {
+                        PrefetchTile tile = tiles.get(tileIndex);
+                        boolean succeeded = false;
+                        try {
+                            if (parallelTerrain) {
+                                futures.get(tileIndex).get();
+                            } else if (terrainCache != null) {
+                                terrainCache.prefetchTile(tile.zoom(), tile.x(), tile.y());
+                            } else if (cartoCache != null) {
+                                cartoCache.getTile(tile.zoom(), tile.x(), tile.y());
+                            } else if (thunderCache != null) {
+                                thunderCache.getTile(tile.zoom(), tile.x(), tile.y());
+                            } else {
+                                throw new IllegalStateException("No tile cache configured for " + type);
+                            }
+                            success++;
+                            succeeded = true;
+                        } catch (Exception e) {
+                            System.err.println("Failed z=" + tile.zoom() + " x=" + tile.x() + " y=" + tile.y()
+                                    + ": " + e.getMessage());
+                        }
+                        processed++;
+                        int[] bounds = mapBounds.get(tile.zoom());
+                        progress.tileMap("Prefetching " + type + " (z" + tile.zoom() + ")",
+                                processed, total, tile.zoom(), tile.x(), tile.y(),
+                                bounds[0], bounds[1], bounds[2], bounds[3], succeeded);
+                    }
+                } finally {
+                    if (workers != null) workers.shutdown();
+                }
+                progress.complete("Prefetching " + type);
+                System.out.println("Prefetch complete: " + success + "/" + total + " tiles ready ("
+                        + (total - success) + " failed), cache=" + cacheDir);
                 progress.close();
                 break;
             }
@@ -314,5 +355,53 @@ public class Main {
                 printUsage();
                 progress.close();
         }
+    }
+
+    /**
+     * Converts a user-facing physical radius to the whole-tile radius needed by the stitched grid.
+     * Bare integers retain the old tile-radius syntax for existing scripts.
+     */
+    static int parseRadiusTiles(String value, double latitude, int zoom) {
+        String normalized = value.trim().toLowerCase();
+        if (normalized.matches("[+]?[0-9]+")) {
+            try {
+                int tiles = Integer.parseInt(normalized);
+                if (tiles < 0) throw new IllegalArgumentException("radius must be >= 0");
+                return tiles;
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Invalid tile radius: " + value, e);
+            }
+        }
+
+        String unit;
+        double multiplier;
+        if (normalized.endsWith("km")) {
+            unit = "km";
+            multiplier = 1_000.0;
+        } else if (normalized.endsWith("mi")) {
+            unit = "mi";
+            multiplier = 1_609.344;
+        } else if (normalized.endsWith("m")) {
+            unit = "m";
+            multiplier = 1.0;
+        } else if (normalized.endsWith("ft")) {
+            unit = "ft";
+            multiplier = 0.3048;
+        } else {
+            throw new IllegalArgumentException("Invalid radius '" + value
+                    + "'; use a number followed by m, km, mi, or ft");
+        }
+
+        String number = normalized.substring(0, normalized.length() - unit.length()).trim();
+        final double meters;
+        try {
+            meters = Double.parseDouble(number) * multiplier;
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("Invalid radius: " + value, e);
+        }
+        if (!Double.isFinite(meters) || meters < 0.0) {
+            throw new IllegalArgumentException("Radius must be a finite non-negative distance: " + value);
+        }
+        return ElevationService.tileRadiusForMeters(latitude, zoom, meters);
     }
 }

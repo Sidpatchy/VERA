@@ -33,6 +33,7 @@ public class ElevationService {
     }
 
     private static final double MAX_MERCATOR_LAT = 85.05112878; // Web Mercator limit
+    private static final double EARTH_CIRCUMFERENCE_METERS = 40_075_016.686;
 
     /**
      * Returns the elevation (in meters) for a single latitude/longitude at the specified zoom level.
@@ -299,6 +300,32 @@ public class ElevationService {
         return new ElevationGrid(data, tileW, tilesSpan, tilesSpan, zoom, centerX, centerY);
     }
 
+    /**
+     * Converts a physical radius to the whole-tile radius used by the stitched grid.
+     * Web Mercator tile width at the observer latitude is used as the local ground-distance
+     * approximation, matching the distance model used by the visibility engine.
+     */
+    public static int tileRadiusForMeters(double latDeg, int zoom, double radiusMeters) {
+        if (!Double.isFinite(radiusMeters) || radiusMeters < 0.0) {
+            throw new IllegalArgumentException("radiusMeters must be a finite non-negative distance");
+        }
+        if (zoom < 0 || zoom > 30) throw new IllegalArgumentException("zoom must be between 0 and 30");
+        double latitude = clamp(latDeg, -MAX_MERCATOR_LAT, MAX_MERCATOR_LAT);
+        double metersPerTile = EARTH_CIRCUMFERENCE_METERS * Math.cos(Math.toRadians(latitude))
+                / Math.scalb(1.0, zoom);
+        if (metersPerTile <= 0.0) throw new IllegalArgumentException("radius cannot be represented at this latitude");
+        double tiles = Math.ceil(radiusMeters / metersPerTile);
+        if (tiles > Integer.MAX_VALUE / 2.0) throw new IllegalArgumentException("radius is too large");
+        return (int) tiles;
+    }
+
+    public static ElevationGrid getElevationGridAround(double latDeg, double lonDeg, int zoom,
+                                                       double radiusMeters, AreaShape shape,
+                                                       TileCache cache) throws IOException {
+        return getElevationGridAround(latDeg, lonDeg, zoom,
+                tileRadiusForMeters(latDeg, zoom, radiusMeters), shape, cache);
+    }
+
     private static int wrapInt(int v, int modulo) {
         int m = v % modulo;
         if (m < 0) m += modulo;
@@ -485,7 +512,7 @@ public class ElevationService {
      * is set to NaN in the returned grid. Visible cells retain their original elevation values.
      *
      * Implementation details:
-     * - Terrain is compared using spherical observer-to-sample geometry, so curvature is applied
+     * - Terrain is compared using WGS84 oblate-spheroid observer-to-sample geometry, so curvature is applied
      *   continuously without materializing a curvature-adjusted copy of the grid.
      * - Then we cast rays uniformly around the observer (angular sweep). Along each ray, we track
      *   the maximum apparent sight angle, sampling each traversed cell at multiple points with
@@ -543,62 +570,15 @@ public class ElevationService {
     }
     /**
      * Applies earth curvature drop to an ElevationGrid, returning a NEW grid with adjusted elevations.
-     * Assumes the viewer is located at the center of the grid. Each cell is lowered by s^2/(2R),
-     * where s is ground distance from the center and R is Earth radius.
-     * Uses Web Mercator ground resolution at the provided center latitude.
+     * Assumes the viewer is located at the center of the grid and projects each
+     * cell onto the observer's local tangent plane on the WGS84 ellipsoid.
      *
-     * Note: This does not consider refraction or viewer eye height; use the overload to customize.
+     * Note: This does not consider refraction or viewer eye height.
      */
     public static ElevationGrid applyEarthCurvatureDrop(ElevationGrid grid, double centerLatDeg) {
         return CurvatureModel.applyCenterCurvature(grid, centerLatDeg);
     }
 
-    /**
-     * Applies earth curvature drop to an ElevationGrid with customization.
-     * - centerLatDeg: latitude (deg) at grid center, used to compute ground resolution.
-     * - earthRadiusMeters: sphere radius for curvature model.
-     * - considerViewerEyeHeight and viewerEyeHeightMeters are retained for API compatibility.
-     *   Observer height affects line-of-sight calculations, not the curvature drop itself.
-     *
-     * Returns a NEW ElevationGrid; the original grid is not modified.
-     */
-    public static ElevationGrid applyEarthCurvatureDrop(ElevationGrid grid,
-                                                        double centerLatDeg,
-                                                        double earthRadiusMeters,
-                                                        boolean considerViewerEyeHeight,
-                                                        double viewerEyeHeightMeters) {
-        int w = grid.width;
-        int h = grid.height;
-        float[][] out = new float[h][w];
-
-        // Ground resolution (meters per pixel) at latitude for Web Mercator
-        double metersPerPixel = (2.0 * Math.PI * earthRadiusMeters * Math.cos(Math.toRadians(centerLatDeg)))
-                / (grid.tileSize * Math.pow(2.0, grid.zoom));
-
-        // Center pixel (viewer position). Use the exact center of the composite grid.
-        double cx = (w - 1) / 2.0;
-        double cy = (h - 1) / 2.0;
-
-        for (int y = 0; y < h; y++) {
-            float[] inRow = grid.data[y];
-            float[] outRow = out[y];
-            for (int x = 0; x < w; x++) {
-                double v = inRow[x];
-                if (Double.isNaN(v)) {
-                    outRow[x] = Float.NaN;
-                    continue;
-                }
-                double dx = (x - cx);
-                double dy = (y - cy);
-                double sPixels = Math.hypot(dx, dy);
-                double sMeters = sPixels * metersPerPixel;
-
-                double drop = (sMeters * sMeters) / (2.0 * earthRadiusMeters);
-                outRow[x] = (float) (v - drop);
-            }
-        }
-        return new ElevationGrid(out, grid.tileSize, grid.tilesWide, grid.tilesHigh, grid.zoom, grid.centerTileX, grid.centerTileY);
-    }
 
     /**
      * In-place variant: modifies the provided grid by applying earth curvature drop using centerLatDeg.

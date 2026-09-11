@@ -12,8 +12,7 @@ import java.util.stream.IntStream;
  */
 public final class VisibilityEngine {
     private static final double[] SEGMENT_SAMPLE_FRACTIONS = {0.01, 0.25, 0.5, 0.75, 0.99};
-    private static final double WGS84_SEMI_MAJOR = 6_378_137.0;
-    private static final double WGS84_ECCENTRICITY_SQUARED = 6.6943799901413165e-3;
+    private static final double GOLDEN_RATIO_CONJUGATE = 0.6180339887498949;
 
     private VisibilityEngine() {}
 
@@ -47,6 +46,7 @@ public final class VisibilityEngine {
         if (angleBins < 8) angleBins = 8;
         // Allow high angular resolution; cap generously to prevent runaway allocations
         if (angleBins > 200000) angleBins = 200000;
+        final int progressTotal = angleBins;
 
         // Observer pixel
         double[] obsPx = latLonToGridPixel(grid, observerLatDeg, observerLonDeg);
@@ -70,23 +70,51 @@ public final class VisibilityEngine {
         else if (mode == ElevationService.ObserverHeightMode.ASL && heightMeters != null) eyeAGL = Math.max(0.0, heightMeters - groundAtObserver);
         final double eyeLevel = groundAtObserver + eyeAGL;
         RaycastContext context = new RaycastContext(grid, observerLatDeg, observerLonDeg, eyeLevel);
-        // Angular sweep using grid DDA ray marching
+        // Angular sweep using grid DDA ray marching. One stratified sample is
+        // used per angular sector instead of always sampling its boundary.
+        // The deterministic jitter prevents the square DEM lattice and the
+        // ray lattice from producing coherent moire spokes, without adding
+        // more rays or making successive renders differ.
         final double twoPi = Math.PI * 2.0;
-        final int rayCount = angleBins;
+        // A fixed angular count undersamples the far edge of large grids: at
+        // radius r, adjacent rays are about 2*pi*r/angleBins pixels apart.
+        // That leaves unvisited diagonal bands even when the angular count
+        // looks high. Increase the sweep only as far as needed to keep the
+        // outermost ray footprint approximately one pixel wide.
+        final int rayCount = Math.max(angleBins, minimumRayCount(obsPx[0], obsPx[1], w, h));
         AtomicInteger completed = progress == null ? null : new AtomicInteger();
         Object progressLock = progress == null ? null : new Object();
         IntStream.range(0, rayCount).parallel().forEach(ai -> {
-            double theta = (ai / (double) rayCount) * twoPi;
+            double jitter = GOLDEN_RATIO_CONJUGATE * (ai + 1);
+            jitter -= Math.floor(jitter);
+            double theta = ((ai + jitter) / rayCount) * twoPi;
             castRayDDA(grid, obsPx[0], obsPx[1], Math.cos(theta), Math.sin(theta),
                     context, visible);
             if (progress != null) {
-                int current = completed.incrementAndGet();
+                int raysCompleted = completed.incrementAndGet();
+                int current = Math.min(progressTotal,
+                        (int) Math.ceil(raysCompleted * (double) progressTotal / rayCount));
                 synchronized (progressLock) {
                     progress.accept(current);
                 }
             }
         });
+        // Preserve exact cardinal coverage for narrow features immediately
+        // around the observer, which can otherwise fall between jittered rays.
+        castRayDDA(grid, obsPx[0], obsPx[1], 1.0, 0.0, context, visible);
+        castRayDDA(grid, obsPx[0], obsPx[1], 0.0, 1.0, context, visible);
+        castRayDDA(grid, obsPx[0], obsPx[1], -1.0, 0.0, context, visible);
+        castRayDDA(grid, obsPx[0], obsPx[1], 0.0, -1.0, context, visible);
         return visible;
+    }
+
+    private static int minimumRayCount(double observerX, double observerY, int width, int height) {
+        double maxDistance = 0.0;
+        maxDistance = Math.max(maxDistance, Math.hypot(observerX, observerY));
+        maxDistance = Math.max(maxDistance, Math.hypot(width - observerX, observerY));
+        maxDistance = Math.max(maxDistance, Math.hypot(observerX, height - observerY));
+        maxDistance = Math.max(maxDistance, Math.hypot(width - observerX, height - observerY));
+        return Math.max(8, (int) Math.ceil(2.0 * Math.PI * maxDistance));
     }
 
     private static final class RaycastContext {
@@ -121,11 +149,10 @@ public final class VisibilityEngine {
             observerCosLat = Math.cos(observerLatRad);
             observerSinLon = Math.sin(observerLonRad);
             observerCosLon = Math.cos(observerLonRad);
-            double radius = WGS84_SEMI_MAJOR / Math.sqrt(
-                    1.0 - WGS84_ECCENTRICITY_SQUARED * observerSinLat * observerSinLat);
-            observerX = (radius + eyeLevel) * observerCosLat * observerCosLon;
-            observerY = (radius + eyeLevel) * observerCosLat * observerSinLon;
-            observerZ = (radius * (1.0 - WGS84_ECCENTRICITY_SQUARED) + eyeLevel) * observerSinLat;
+            double[] observer = Wgs84.ecef(observerLatRad, observerLonRad, eyeLevel);
+            observerX = observer[0];
+            observerY = observer[1];
+            observerZ = observer[2];
             upX = observerCosLat * observerCosLon;
             upY = observerCosLat * observerSinLon;
             upZ = observerSinLat;
@@ -156,8 +183,8 @@ public final class VisibilityEngine {
                 double latitude = Math.atan(Math.sinh(mercator));
                 latitudeSin[y] = Math.sin(latitude);
                 latitudeCos[y] = Math.cos(latitude);
-                ellipsoidRadius[y] = WGS84_SEMI_MAJOR / Math.sqrt(
-                        1.0 - WGS84_ECCENTRICITY_SQUARED * latitudeSin[y] * latitudeSin[y]);
+                ellipsoidRadius[y] = Wgs84.SEMI_MAJOR_METERS / Math.sqrt(
+                        1.0 - Wgs84.ECCENTRICITY_SQUARED * latitudeSin[y] * latitudeSin[y]);
             }
         }
     }
@@ -258,7 +285,7 @@ public final class VisibilityEngine {
         double targetRadius = interpolate(context.ellipsoidRadius[y0], context.ellipsoidRadius[y1], ty);
         double targetX = (targetRadius + terrainElevation) * cosLat * cosLon;
         double targetY = (targetRadius + terrainElevation) * cosLat * sinLon;
-        double targetZ = (targetRadius * (1.0 - WGS84_ECCENTRICITY_SQUARED)
+        double targetZ = (targetRadius * (1.0 - Wgs84.ECCENTRICITY_SQUARED)
                 + terrainElevation) * sinLat;
         double dx = targetX - context.observerX;
         double dy = targetY - context.observerY;

@@ -24,7 +24,7 @@ class KmzExporterTest {
         try {
             KmzExporter.writeViewshed(output, source, grid);
             try (ZipFile zip = new ZipFile(output.toFile());
-                 InputStream png = zip.getInputStream(zip.getEntry("viewshed.png"))) {
+                 InputStream png = zip.getInputStream(zip.getEntry("viewshed/r0c0.png"))) {
                 BufferedImage result = ImageIO.read(png);
                 int expectedY = 84;
                 int redY = -1;
@@ -35,6 +35,28 @@ class KmzExporterTest {
                     }
                 }
                 assertEquals(expectedY, redY);
+            }
+        } finally {
+            Files.deleteIfExists(output);
+        }
+    }
+
+    @Test
+    void splitsLargeImagesIntoGoogleEarthSizedOverlays() throws Exception {
+        BufferedImage source = new BufferedImage(4096, 4096, BufferedImage.TYPE_INT_ARGB);
+        float[][] values = new float[4096][4096];
+        ElevationService.ElevationGrid grid = new ElevationService.ElevationGrid(
+                values, 4096, 1, 1, 2, 2, 2);
+        Path output = Files.createTempFile("large-viewshed", ".kmz");
+        try {
+            KmzExporter.writeViewshed(output, source, grid);
+            try (ZipFile zip = new ZipFile(output.toFile());
+                 InputStream first = zip.getInputStream(zip.getEntry("viewshed/r0c0.png"));
+                 InputStream last = zip.getInputStream(zip.getEntry("viewshed/r1c1.png"))) {
+                assertEquals(2048, ImageIO.read(first).getWidth());
+                assertEquals(2048, ImageIO.read(last).getHeight());
+                String kml = new String(zip.getInputStream(zip.getEntry("doc.kml")).readAllBytes());
+                assertEquals(4, kml.split("<GroundOverlay>", -1).length - 1);
             }
         } finally {
             Files.deleteIfExists(output);

@@ -52,7 +52,10 @@ public class TileCache {
     }
 
     public File getTile(int zoom, int x, int y) throws IOException {
-        if (provider == ElevationProvider.COPERNICUS_GLO30) return copernicus.getTile(zoom, x, y);
+        if (provider == ElevationProvider.COPERNICUS_GLO30) {
+            throw new UnsupportedOperationException(
+                    "Copernicus data is COG-backed; use getElevationData() instead of getTile()");
+        }
         String filename = String.format("%d_%d_%d.png", zoom, x, y);
         Path tilePath = cacheDir.resolve("terrarium").resolve(filename);
         File tileFile = tilePath.toFile();
@@ -109,6 +112,15 @@ public class TileCache {
         }
 
         return tileFile;
+    }
+
+    /** Ensures the source data needed for a tile is present in the provider's native cache. */
+    public void prefetchTile(int zoom, int x, int y) throws IOException {
+        if (provider == ElevationProvider.COPERNICUS_GLO30) {
+            copernicus.prefetchTile(zoom, x, y);
+        } else {
+            getTile(zoom, x, y);
+        }
     }
 
     /** Returns decoded elevation values using a bounded memory cache. */

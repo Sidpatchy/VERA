@@ -2,9 +2,7 @@ package com.sidpatchy.Tile;
 
 import javax.imageio.ImageIO;
 import com.twelvemonkeys.imageio.plugins.tiff.TIFFImageReaderSpi;
-import java.awt.image.BufferedImage;
 import java.awt.image.Raster;
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -14,6 +12,9 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import javax.imageio.ImageReader;
 import javax.imageio.stream.ImageInputStream;
 
@@ -23,6 +24,7 @@ import javax.imageio.stream.ImageInputStream;
 final class CopernicusGlo30TileCache {
     private static final String BUCKET = "https://copernicus-dem-30m.s3.amazonaws.com/";
     private final Path cacheDir;
+    private final Map<Path, CompletableFuture<Void>> activeDownloads = new ConcurrentHashMap<>();
     private final Map<String, Raster> sourceImages = new LinkedHashMap<>(4, 0.75f, true) {
         @Override protected boolean removeEldestEntry(Map.Entry<String, Raster> eldest) {
             return size() > 2;
@@ -51,42 +53,30 @@ final class CopernicusGlo30TileCache {
         return output;
     }
 
-    File getTile(int zoom, int x, int y) throws IOException {
+    /** Ensures the one-degree COGs touched by a tile are present without decoding the tile. */
+    void prefetchTile(int zoom, int x, int y) throws IOException {
         int n = 1 << zoom;
-        int wrappedX = ((x % n) + n) % n;
-        Path tile = cacheDir.resolve("copernicus").resolve(
-                String.format("%d_%d_%d.png", zoom, wrappedX, y));
-        Files.createDirectories(tile.getParent());
-        if (Files.exists(tile) && ImageIO.read(tile.toFile()) != null) return tile.toFile();
-
-        BufferedImage output = new BufferedImage(256, 256, BufferedImage.TYPE_INT_RGB);
-        for (int py = 0; py < 256; py++) {
-            double globalY = (y + (py + 0.5) / 256.0) / n;
-            double lat = Math.toDegrees(Math.atan(Math.sinh(Math.PI * (1.0 - 2.0 * globalY))));
-            for (int px = 0; px < 256; px++) {
-                double lon = (wrappedX + (px + 0.5) / 256.0) / n * 360.0 - 180.0;
-                double elevation = sample(lat, lon);
-                int encoded = (int) Math.round(Math.max(0.0, Math.min(65535.0, elevation + 32768.0)) * 256.0);
-                encoded = Math.max(0, Math.min(65535 * 256, encoded));
-                int r = Math.min(255, encoded / (256 * 256));
-                int g = Math.min(255, (encoded / 256) & 0xff);
-                int b = Math.min(255, encoded & 0xff);
-                output.setRGB(px, py, (r << 16) | (g << 8) | b);
+        int wrappedX = Math.floorMod(x, n);
+        double west = (double) wrappedX / n * 360.0 - 180.0;
+        double east = (double) (wrappedX + 1) / n * 360.0 - 180.0;
+        double north = latitudeAtTileEdge(y, n);
+        double south = latitudeAtTileEdge(y + 1, n);
+        int westCell = Math.max(-180, Math.min(179, (int) Math.floor(west)));
+        int eastCell = Math.max(-180, Math.min(179, (int) Math.floor(Math.nextDown(east))));
+        int southCell = Math.max(-90, Math.min(89, (int) Math.floor(south)));
+        int northCell = Math.max(-90, Math.min(89, (int) Math.floor(north)));
+        for (int cellSouth = southCell; cellSouth <= northCell; cellSouth++) {
+            for (int cellWest = westCell; cellWest <= eastCell; cellWest++) {
+                ensureDownloaded(cogPath(cellSouth, cellWest), cogStem(cellSouth, cellWest));
             }
         }
-        Path part = Files.createTempFile(cacheDir, tile.getFileName().toString(), ".part");
-        try {
-            ImageIO.write(output, "png", part.toFile());
-            try {
-                Files.move(part, tile, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
-                Files.move(part, tile, StandardCopyOption.REPLACE_EXISTING);
-            }
-        } finally {
-            Files.deleteIfExists(part);
-        }
-        return tile.toFile();
     }
+
+    private static double latitudeAtTileEdge(int y, int tileCount) {
+        double globalY = (double) y / tileCount;
+        return Math.toDegrees(Math.atan(Math.sinh(Math.PI * (1.0 - 2.0 * globalY))));
+    }
+
 
     private double sample(double lat, double lon) throws IOException {
         if (lat <= -90.0 || lat >= 90.0) return 0.0;
@@ -109,10 +99,8 @@ final class CopernicusGlo30TileCache {
     }
 
     private Raster loadRaster(int south, int west) throws IOException {
-        String northing = (south >= 0 ? "N" : "S") + String.format("%02d_00", Math.abs(south));
-        String easting = (west >= 0 ? "E" : "W") + String.format("%03d_00", Math.abs(west));
-        String stem = "Copernicus_DSM_COG_10_" + northing + "_" + easting + "_DEM";
-        Path local = cacheDir.resolve("cog").resolve(stem + ".tif");
+        String stem = cogStem(south, west);
+        Path local = cogPath(south, west);
         Files.createDirectories(local.getParent());
         Raster raster = sourceImages.get(local.toString());
         if (raster == null) {
@@ -127,35 +115,78 @@ final class CopernicusGlo30TileCache {
             }
         }
         if (raster == null) {
-            Path part = Files.createTempFile(local.getParent(), stem, ".part");
-            HttpURLConnection connection = (HttpURLConnection) URI.create(
-                    BUCKET + stem + "/" + stem + ".tif").toURL().openConnection();
-            connection.setConnectTimeout(30_000);
-            connection.setReadTimeout(120_000);
-            connection.setInstanceFollowRedirects(true);
-            try {
-                if (connection.getResponseCode() / 100 != 2) {
-                    throw new IOException("Unable to download Copernicus COG: HTTP "
-                            + connection.getResponseCode() + " for " + connection.getURL());
-                }
-                try (InputStream in = connection.getInputStream()) {
-                    Files.copy(in, part, StandardCopyOption.REPLACE_EXISTING);
-                    if (Files.size(part) == 0) {
-                        throw new IOException("Downloaded empty Copernicus COG: " + local);
-                    }
-                    raster = readTiffRaster(part);
-                    validateRaster(part, raster);
-                    Files.move(part, local, StandardCopyOption.ATOMIC_MOVE);
-                }
-            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
-                Files.move(part, local, StandardCopyOption.REPLACE_EXISTING);
-            } finally {
-                connection.disconnect();
-                Files.deleteIfExists(part);
-            }
+            ensureDownloaded(local, stem);
+            raster = readTiffRaster(local);
+            validateRaster(local, raster);
         }
         sourceImages.put(local.toString(), raster);
         return raster;
+    }
+
+    private Path cogPath(int south, int west) {
+        return cacheDir.resolve("cog").resolve(cogStem(south, west) + ".tif");
+    }
+
+    private static String cogStem(int south, int west) {
+        String northing = (south >= 0 ? "N" : "S") + String.format("%02d_00", Math.abs(south));
+        String easting = (west >= 0 ? "E" : "W") + String.format("%03d_00", Math.abs(west));
+        return "Copernicus_DSM_COG_10_" + northing + "_" + easting + "_DEM";
+    }
+
+    private void ensureDownloaded(Path local, String stem) throws IOException {
+        if (Files.exists(local) && Files.size(local) > 0) return;
+        CompletableFuture<Void> download = new CompletableFuture<>();
+        CompletableFuture<Void> existing = activeDownloads.putIfAbsent(local, download);
+        if (existing == null) {
+            CompletableFuture.runAsync(() -> {
+                try {
+                    downloadFile(local, stem);
+                    download.complete(null);
+                } catch (Exception e) {
+                    download.completeExceptionally(e);
+                }
+            }).whenComplete((ignored, error) -> activeDownloads.remove(local, download));
+            existing = download;
+        }
+        try {
+            existing.join();
+        } catch (CompletionException e) {
+            if (e.getCause() instanceof IOException ioException) throw ioException;
+            throw e;
+        }
+    }
+
+    private void downloadFile(Path local, String stem) throws IOException {
+        Files.createDirectories(local.getParent());
+        Path part = Files.createTempFile(local.getParent(), stem, ".part");
+        HttpURLConnection connection = (HttpURLConnection) URI.create(
+                BUCKET + stem + "/" + stem + ".tif").toURL().openConnection();
+        connection.setConnectTimeout(30_000);
+        connection.setReadTimeout(120_000);
+        connection.setInstanceFollowRedirects(true);
+        try {
+            if (connection.getResponseCode() / 100 != 2) {
+                throw new IOException("Unable to download Copernicus COG: HTTP "
+                        + connection.getResponseCode() + " for " + connection.getURL());
+            }
+            try (InputStream in = connection.getInputStream()) {
+                Files.copy(in, part, StandardCopyOption.REPLACE_EXISTING);
+                if (Files.size(part) == 0) {
+                    throw new IOException("Downloaded empty Copernicus COG: " + local);
+                }
+                Raster raster = readTiffRaster(part);
+                validateRaster(part, raster);
+                try {
+                    Files.move(part, local, StandardCopyOption.ATOMIC_MOVE,
+                            StandardCopyOption.REPLACE_EXISTING);
+                } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                    Files.move(part, local, StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+        } finally {
+            connection.disconnect();
+            Files.deleteIfExists(part);
+        }
     }
 
     private static Raster readTiffRaster(Path file) throws IOException {

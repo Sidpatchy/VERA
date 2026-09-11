@@ -38,7 +38,6 @@ public final class CurvatureModel {
     }
     private CurvatureModel() {}
 
-    private static final double DEFAULT_EARTH_RADIUS_M = 6_371_008.8; // IUGG mean radius
     private static final String DEFAULT_CACHE_DIR = "./terrain_cache/curvature_cache";
 
     /**
@@ -48,34 +47,18 @@ public final class CurvatureModel {
     public static ElevationService.ElevationGrid applyCenterCurvature(
             ElevationService.ElevationGrid grid,
             double centerLatDeg) {
-        return applyCenterCurvature(grid, centerLatDeg, DEFAULT_EARTH_RADIUS_M);
-    }
-
-    public static ElevationService.ElevationGrid applyCenterCurvature(
-            ElevationService.ElevationGrid grid,
-            double centerLatDeg,
-            double earthRadiusMeters) {
-        // Compute meters per pixel at latitude for Web Mercator
-        double metersPerPixel = (2.0 * Math.PI * earthRadiusMeters * Math.cos(Math.toRadians(centerLatDeg)))
-                / (grid.tileSize * Math.pow(2.0, grid.zoom));
-
         int w = grid.width;
         int h = grid.height;
         float[][] out = new float[h][w];
-        double cx = (w - 1) / 2.0;
-        double cy = (h - 1) / 2.0;
-
-        // Vectorized-style inner loops (but in Java)
+        double[] center = gridPixelToLatLon(grid, (w - 1) / 2.0, (h - 1) / 2.0);
         for (int y = 0; y < h; y++) {
             float[] inRow = grid.data[y];
             float[] outRow = out[y];
-            double dy = (y - cy);
             for (int x = 0; x < w; x++) {
                 double v = inRow[x];
                 if (Double.isNaN(v)) { outRow[x] = Float.NaN; continue; }
-                double dx = (x - cx);
-                double sMeters = Math.hypot(dx, dy) * metersPerPixel;
-                double drop = (sMeters * sMeters) / (2.0 * earthRadiusMeters);
+                double[] target = gridPixelToLatLon(grid, x, y);
+                double drop = Wgs84.surfaceDrop(center[0], center[1], target[0], target[1]);
                 outRow[x] = (float) (v - drop);
             }
         }
@@ -133,9 +116,8 @@ public final class CurvatureModel {
                                          ElevationService.ElevationGrid grid,
                                          double observerLatDeg, double observerLonDeg) {
         if (Float.isNaN(value)) return Double.NaN;
-        double centralAngle = centralAngle(observerLatDeg, observerLonDeg,
-                gridPixelToLatLon(grid, x, y));
-        double drop = DEFAULT_EARTH_RADIUS_M * (1.0 - Math.cos(centralAngle));
+        double[] target = gridPixelToLatLon(grid, x, y);
+        double drop = Wgs84.surfaceDrop(observerLatDeg, observerLonDeg, target[0], target[1]);
         return value - drop;
     }
 
@@ -168,7 +150,7 @@ public final class CurvatureModel {
             TileCache cache) throws IOException {
         boolean enableCache = isCurvatureCacheEnabledByDefault();
         String cacheDir = getCurvatureCacheDir();
-        return applyObserverCurvature(grid, observerLatDeg, observerLonDeg, mode, heightMeters, cache, DEFAULT_EARTH_RADIUS_M, cacheDir, enableCache);
+        return applyObserverCurvature(grid, observerLatDeg, observerLonDeg, mode, heightMeters, cache, cacheDir, enableCache);
     }
 
     public static ElevationService.ElevationGrid applyObserverCurvature(
@@ -178,7 +160,6 @@ public final class CurvatureModel {
             ElevationService.ObserverHeightMode mode,
             Double heightMeters,
             TileCache cache,
-            double earthRadiusMeters,
             String cacheDir,
             boolean enableCache) throws IOException {
         // Prepare cache path
@@ -188,7 +169,7 @@ public final class CurvatureModel {
         String key = null;
         Path filePath = null;
         if (enableCache) {
-            key = buildKey(grid, observerLatDeg, observerLonDeg, mode, heightMeters, earthRadiusMeters);
+            key = buildKey(grid, observerLatDeg, observerLonDeg, mode, heightMeters);
             filePath = Paths.get(cacheDir, key + ".bin");
             if (Files.exists(filePath)) {
                 ElevationService.ElevationGrid cached = tryReadGrid(filePath, grid);
@@ -204,9 +185,8 @@ public final class CurvatureModel {
             for (int x = 0; x < w; x++) {
                 double v = inRow[x];
                 if (Double.isNaN(v)) { outRow[x] = Float.NaN; continue; }
-                double centralAngle = centralAngle(observerLatDeg, observerLonDeg,
-                        gridPixelToLatLon(grid, x, y));
-                double drop = earthRadiusMeters * (1.0 - Math.cos(centralAngle));
+                double[] target = gridPixelToLatLon(grid, x, y);
+                double drop = Wgs84.surfaceDrop(observerLatDeg, observerLonDeg, target[0], target[1]);
                 outRow[x] = (float) (v - drop);
             }
         }
@@ -244,28 +224,11 @@ public final class CurvatureModel {
         return new double[]{lat, lon};
     }
 
-    private static double centralAngle(double observerLatDeg, double observerLonDeg, double[] pointLatLon) {
-        double lat1 = Math.toRadians(observerLatDeg);
-        double lat2 = Math.toRadians(pointLatLon[0]);
-        double dLat = lat2 - lat1;
-        double dLon = Math.toRadians(shortestLongitudeDelta(pointLatLon[1] - observerLonDeg));
-        double haversine = Math.sin(dLat * 0.5) * Math.sin(dLat * 0.5)
-                + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon * 0.5) * Math.sin(dLon * 0.5);
-        return 2.0 * Math.atan2(Math.sqrt(haversine), Math.sqrt(Math.max(0.0, 1.0 - haversine)));
-    }
-
-    private static double shortestLongitudeDelta(double delta) {
-        double result = delta % 360.0;
-        if (result < -180.0) result += 360.0;
-        if (result >= 180.0) result -= 360.0;
-        return result;
-    }
-
-    private static String buildKey(ElevationService.ElevationGrid g, double olat, double olon, ElevationService.ObserverHeightMode m, Double h, double R) {
+    private static String buildKey(ElevationService.ElevationGrid g, double olat, double olon, ElevationService.ObserverHeightMode m, Double h) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
             String meta = g.width+"x"+g.height+"_ts"+g.tileSize+"_tw"+g.tilesWide+"_th"+g.tilesHigh+"_z"+g.zoom+"_cx"+g.centerTileX+"_cy"+g.centerTileY+
-                    "|olat="+String.format("%.6f", olat)+"|olon="+String.format("%.6f", olon)+"|mode="+m+"|h="+(h==null?"":String.format("%.2f", h))+"|R="+R;
+                    "|olat="+String.format("%.6f", olat)+"|olon="+String.format("%.6f", olon)+"|mode="+m+"|h="+(h==null?"":String.format("%.2f", h))+"|wgs84";
             md.update(meta.getBytes());
             // Also mix in a lightweight checksum of grid values to avoid mismatches when tiles change
             long checksum = 0;
