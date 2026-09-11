@@ -3,6 +3,7 @@ package com.sidpatchy;
 import com.sidpatchy.Tile.ElevationService;
 
 import javax.imageio.ImageIO;
+import java.awt.Color;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -22,7 +23,7 @@ public final class KmzExporter {
                                      ElevationService.ElevationGrid grid) throws IOException {
         Path parent = output.toAbsolutePath().getParent();
         if (parent != null) Files.createDirectories(parent);
-        BufferedImage overlay = toRedOverlay(image);
+        BufferedImage overlay = reprojectToLatitude(image, grid);
         String title = buildTitle(output);
 
         try (OutputStream file = Files.newOutputStream(output);
@@ -69,6 +70,62 @@ public final class KmzExporter {
             overlay.setRGB(0, y, image.getWidth(), 1, pixels, 0, image.getWidth());
         }
         return overlay;
+    }
+
+    /**
+     * Converts the Web Mercator image rows into rows spaced linearly in latitude.
+     * KML LatLonBox overlays use geographic (Plate Carrée) row placement, while
+     * the terrain grid and its source tiles use Web Mercator row placement.
+     */
+    private static BufferedImage reprojectToLatitude(BufferedImage image,
+                                                      ElevationService.ElevationGrid grid) {
+        BufferedImage mercatorOverlay = toRedOverlay(image);
+        int width = mercatorOverlay.getWidth();
+        int height = mercatorOverlay.getHeight();
+        if (height == 0 || width == 0) return mercatorOverlay;
+
+        int n = 1 << grid.zoom;
+        int radius = (grid.tilesWide - 1) / 2;
+        double top = (double) (grid.centerTileY - radius) / n;
+        double bottom = (double) (grid.centerTileY + radius + 1) / n;
+        double north = tileYToLatitude(grid.centerTileY - radius, n);
+        double south = tileYToLatitude(grid.centerTileY + radius + 1, n);
+
+        BufferedImage geographic = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < height; y++) {
+            double latitude = north + (south - north) * ((y + 0.5) / height);
+            double mercator = latitudeToTileY(latitude);
+            double sourceY = ((mercator - top) / (bottom - top)) * height - 0.5;
+            int lower = (int) Math.floor(sourceY);
+            double fraction = sourceY - lower;
+            int upper = lower + 1;
+            lower = Math.max(0, Math.min(height - 1, lower));
+            upper = Math.max(0, Math.min(height - 1, upper));
+            for (int x = 0; x < width; x++) {
+                int a = mercatorOverlay.getRGB(x, lower);
+                int b = mercatorOverlay.getRGB(x, upper);
+                geographic.setRGB(x, y, blend(a, b, fraction));
+            }
+        }
+        return geographic;
+    }
+
+    private static double latitudeToTileY(double latitude) {
+        double clamped = Math.max(-85.05112878, Math.min(85.05112878, latitude));
+        double radians = Math.toRadians(clamped);
+        return (1.0 - Math.log(Math.tan(radians) + 1.0 / Math.cos(radians)) / Math.PI) / 2.0;
+    }
+
+    private static int blend(int first, int second, double fraction) {
+        int a = blendChannel((first >>> 24) & 0xff, (second >>> 24) & 0xff, fraction);
+        int r = blendChannel((first >>> 16) & 0xff, (second >>> 16) & 0xff, fraction);
+        int g = blendChannel((first >>> 8) & 0xff, (second >>> 8) & 0xff, fraction);
+        int b = blendChannel(first & 0xff, second & 0xff, fraction);
+        return new Color(r, g, b, a).getRGB();
+    }
+
+    private static int blendChannel(int first, int second, double fraction) {
+        return (int) Math.round(first + (second - first) * fraction);
     }
 
     private static String buildKml(ElevationService.ElevationGrid grid, String title) {
