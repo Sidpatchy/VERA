@@ -31,6 +31,7 @@ public class TileCache {
                 }
             };
     private int batchDepth;
+    private int pendingTileCount;
     private final Map<String, float[][]> decodedMemory = new LinkedHashMap<>(64, 0.75f, true) {
         @Override protected boolean removeEldestEntry(Map.Entry<String, float[][]> eldest) { return size() > 64; }
     };
@@ -219,6 +220,9 @@ public class TileCache {
     private void storeDecoded(Path file, String key, float[][] decoded) throws IOException {
         if (batchDepth > 0) {
             pendingDecoded.computeIfAbsent(file, ignored -> new LinkedHashMap<>()).put(key, decoded);
+            if (++pendingTileCount >= 256) {
+                flushPendingDecoded();
+            }
         } else {
             writeDecoded(file, key, decoded);
         }
@@ -232,6 +236,7 @@ public class TileCache {
             writeDecoded(file, values);
         }
         pendingDecoded.clear();
+        pendingTileCount = 0;
     }
 
     private void writeDecoded(Path file, String key, float[][] decoded) throws IOException {

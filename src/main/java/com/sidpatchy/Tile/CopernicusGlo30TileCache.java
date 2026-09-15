@@ -42,8 +42,8 @@ final class CopernicusGlo30TileCache {
     };
     private volatile Set<String> availableStems;
     private Raster activeRaster;
-    private int activeSouth;
-    private int activeWest;
+    private int activeSouth = Integer.MIN_VALUE;
+    private int activeWest = Integer.MIN_VALUE;
 
     CopernicusGlo30TileCache(Path cacheDir) {
         this(cacheDir, Runnable::run);
@@ -198,7 +198,7 @@ final class CopernicusGlo30TileCache {
         int south = (int) Math.floor(lat);
         int west = (int) Math.floor(lon);
         Raster raster;
-        if (activeRaster != null && activeSouth == south && activeWest == west) {
+        if (activeSouth == south && activeWest == west) {
             raster = activeRaster;
         } else {
             raster = loadRaster(south, west);
@@ -206,6 +206,7 @@ final class CopernicusGlo30TileCache {
             activeSouth = south;
             activeWest = west;
         }
+        if (raster == null) return 0.0;
         int px = Math.max(0, Math.min(raster.getWidth() - 1,
                 (int) Math.floor((lon - west) * raster.getWidth())));
         int py = Math.max(0, Math.min(raster.getHeight() - 1,
@@ -230,11 +231,16 @@ final class CopernicusGlo30TileCache {
             }
         }
         if (raster == null) {
+            if (!availableStems().contains(stem)) {
+                return null;
+            }
             ensureDownloaded(local, stem);
             raster = readTiffRaster(local);
             validateRaster(local, raster);
         }
-        sourceImages.put(local.toString(), raster);
+        if (raster != null) {
+            sourceImages.put(local.toString(), raster);
+        }
         return raster;
     }
 
@@ -258,6 +264,9 @@ final class CopernicusGlo30TileCache {
     }
 
     private CompletableFuture<Void> ensureDownloadedAsync(Path local, String stem) {
+        if (!availableStems().contains(stem)) {
+            return CompletableFuture.completedFuture(null);
+        }
         try {
             if (Files.exists(local) && Files.size(local) > 0) {
                 return CompletableFuture.completedFuture(null);

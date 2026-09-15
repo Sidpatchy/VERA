@@ -25,9 +25,9 @@ import java.util.concurrent.ThreadFactory;
 
 public class Main {
     private static final int DEFAULT_PREFETCH_THREADS = 8;
-    private record PrefetchTile(int zoom, int x, int y) { }
+    static record PrefetchTile(int zoom, int x, int y) { }
 
-    private static List<PrefetchTile> planPrefetchTiles(
+    static List<PrefetchTile> planPrefetchTiles(
             double minLat, double minLon, double maxLat, double maxLon, int zMin, int zMax) {
         List<PrefetchTile> tiles = new ArrayList<>();
         for (int z = zMin; z <= zMax; z++) {
@@ -44,6 +44,36 @@ public class Main {
                 addPrefetchTiles(tiles, z, xMin, n - 1, yMin, yMax);
             } else {
                 addPrefetchTiles(tiles, z, xMin, xMax, yMin, yMax);
+            }
+        }
+        return tiles;
+    }
+
+    static List<PrefetchTile> preparePrefetchTiles(
+            List<PrefetchTile> tiles, TileCache terrainCache, ElevationProvider provider, boolean compile,
+            Map<PrefetchTile, String> coverageByTile) {
+        if (terrainCache != null && provider == ElevationProvider.COPERNICUS_GLO30) {
+            if (!compile) {
+                Set<String> seenCoverage = new HashSet<>();
+                tiles.removeIf(tile -> {
+                    String coverageKey = terrainCache.prefetchAvailableCoverageKey(
+                            tile.zoom(), tile.x(), tile.y());
+                    if (coverageKey.isEmpty()) return true;
+                    boolean hasNewCell = false;
+                    for (String cell : coverageKey.split(",")) {
+                        if (seenCoverage.add(cell)) hasNewCell = true;
+                    }
+                    if (hasNewCell) coverageByTile.put(tile, coverageKey);
+                    return !hasNewCell;
+                });
+            } else {
+                for (PrefetchTile tile : tiles) {
+                    String coverageKey = terrainCache.prefetchAvailableCoverageKey(
+                            tile.zoom(), tile.x(), tile.y());
+                    if (!coverageKey.isEmpty()) {
+                        coverageByTile.put(tile, coverageKey);
+                    }
+                }
             }
         }
         return tiles;
@@ -327,20 +357,7 @@ public class Main {
                 TileCache terrainCache = type.equals("terrain")
                         ? new TileCache(cacheDir, provider, downloadExecutor) : null;
                 Map<PrefetchTile, String> coverageByTile = new HashMap<>();
-                if (terrainCache != null && provider == ElevationProvider.COPERNICUS_GLO30) {
-                    Set<String> seenCoverage = new HashSet<>();
-                    tiles.removeIf(tile -> {
-                        String coverageKey = terrainCache.prefetchAvailableCoverageKey(
-                                tile.zoom(), tile.x(), tile.y());
-                        if (coverageKey.isEmpty()) return true;
-                        boolean hasNewCell = false;
-                        for (String cell : coverageKey.split(",")) {
-                            if (seenCoverage.add(cell)) hasNewCell = true;
-                        }
-                        if (hasNewCell) coverageByTile.put(tile, coverageKey);
-                        return !hasNewCell;
-                    });
-                }
+                preparePrefetchTiles(tiles, terrainCache, provider, compile, coverageByTile);
                 int total = tiles.size();
                 int success = 0;
                 int processed = 0;
@@ -361,6 +378,9 @@ public class Main {
                     bounds[1] = Math.max(bounds[1], tile.x());
                     bounds[2] = Math.min(bounds[2], tile.y());
                     bounds[3] = Math.max(bounds[3], tile.y());
+                }
+                if (compile && terrainCache != null) {
+                    terrainCache.beginBatch();
                 }
                 boolean parallelTerrain = terrainCache != null && provider == ElevationProvider.COPERNICUS_GLO30;
                 ExecutorService workers = parallelTerrain ? Executors.newFixedThreadPool(prefetchThreads) : null;
@@ -399,7 +419,7 @@ public class Main {
                                     + ": " + (e.getMessage() == null ? e : e.getMessage()));
                         }
                         processed++;
-                        if (provider == ElevationProvider.COPERNICUS_GLO30 && terrainCache != null) {
+                        if (!compile && provider == ElevationProvider.COPERNICUS_GLO30 && terrainCache != null) {
                             progress.coverageMap("Prefetching " + type, processed, total, coverageCells,
                                     coverageByTile.get(tile), succeeded);
                         } else {
@@ -412,6 +432,12 @@ public class Main {
                 } finally {
                     if (workers != null) workers.shutdown();
                     if (downloads != null) downloads.shutdown();
+                    if (compile && terrainCache != null) {
+                        try {
+                            terrainCache.endBatch();
+                        } catch (Exception ignored) {
+                        }
+                    }
                 }
                 progress.complete("Prefetching " + type);
                 System.out.println("Prefetch complete: " + success + "/" + total + " tiles ready ("
